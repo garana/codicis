@@ -138,7 +138,10 @@ Linux (CI/container) during hardening.
 - [x] P0 Skeleton and build system: CMake, Platform detection, vendored
       Catch2 (offline-safe), `util` library (Result/Status, Buffer, logging,
       Clock), first passing test, README/CLAUDE, skills. `ctest` green.
-- [ ] P1 Config subsystem
+- [x] P1 Config subsystem: OptionRegistry (single shared declaration),
+      `key = value` file parser, CLI parser (`--k=v`, `--k v`, bare bool,
+      `--config`), precedence defaults->file->CLI, type/range validation,
+      unknown-key rejection. Typed getters. Catch2 suite green.
 - [ ] P2 Event loop (kqueue + epoll)
 - [ ] P3 Net HTTP
 - [ ] P4 Net WebSocket

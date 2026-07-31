@@ -38,6 +38,7 @@ include(Platform)
 # ---- Subsystems ------------------------------------------------------------
 
 add_subdirectory(src/util)
+add_subdirectory(src/config)
 
 # ---- Tests -----------------------------------------------------------------
 

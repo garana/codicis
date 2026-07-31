@@ -15,3 +15,7 @@ endfunction()
 codicis_add_test(test_util
   unit/test_util.cc)
 target_link_libraries(test_util PRIVATE codicis_util)
+
+codicis_add_test(test_config
+  unit/test_config.cc)
+target_link_libraries(test_config PRIVATE codicis_config)
