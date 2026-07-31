@@ -1,0 +1,16 @@
+# Build output
+/build/
+/build-*/
+cmake-build-*/
+
+# Editor / OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+compile_commands.json
+
+# CMake local
+CMakeCache.txt
+CMakeFiles/
