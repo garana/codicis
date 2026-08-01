@@ -246,6 +246,13 @@ Linux (CI/container) during hardening.
             CancelAggressor/CancelBoth via client_id), Min-Quantity floor, and
             GTD/DAY expiry (expiry_ns + OrderBook::expire(now) returning
             cancelled ids for the app to sweep on a timer).
-      - [ ] OT3 stops/trailing, OT4 iceberg/hidden/discretionary, OT5 pegged,
-            OT6 OCO/OTO/bracket, OT7 auctions, OT8 storage determinism.
+      - [x] OT3 stops & trailing: stop-market, stop-limit, and trailing-stop
+            orders parked in a pending structure keyed off the last trade
+            price; a trigger evaluator fires them (inject as market/limit),
+            cascading until quiescent (firing by arrival seq); trailing stops
+            re-anchor on favorable moves. Cancel works while parked;
+            `last_trade_price`/`pending_stop_count` accessors. (Trigger scan is
+            O(pending); price-keyed stop maps are the later optimization.)
+      - [ ] OT4 iceberg/hidden/discretionary, OT5 pegged, OT6 OCO/OTO/bracket,
+            OT7 auctions, OT8 storage determinism.
 - [ ] H1-H2 Hardening (TLS + robustness)

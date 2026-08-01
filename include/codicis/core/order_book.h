@@ -43,9 +43,10 @@ struct Trade {
 struct SubmitOutcome {
   bool accepted = true;         /**< False if the order was rejected. */
   std::string reject_reason;    /**< Populated when !accepted. */
-  std::vector<Trade> trades;    /**< Executions produced, in order. */
+  std::vector<Trade> trades;    /**< Executions produced, incl. cascades. */
   Quantity filled = 0;          /**< Total quantity executed. */
   bool rested = false;          /**< True if a remainder rests in the book. */
+  bool pending_trigger = false; /**< True if parked awaiting a stop trigger. */
   OrderId order_id = 0;         /**< The submitted order's id. */
 };
 
@@ -134,8 +135,18 @@ class OrderBook {
    */
   std::vector<OrderId> expire(Timestamp now);
 
+  /**
+   * @brief Get the last trade price (the stop-trigger reference).
+   * @param out Receives the last trade price on success.
+   * @return True if at least one trade has occurred.
+   */
+  bool last_trade_price(Ticks* out) const;
+
   /** @return The number of resting orders across both sides. */
   std::size_t resting_count() const;
+
+  /** @return The number of stop/trailing orders awaiting a trigger. */
+  std::size_t pending_stop_count() const;
 
  private:
   struct Impl;

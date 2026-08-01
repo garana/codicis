@@ -17,6 +17,7 @@ Checks: >
   -misc-no-recursion,
   -misc-include-cleaner,
   -misc-const-correctness,
+  -misc-use-anonymous-namespace,
   -modernize-avoid-c-arrays,
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,

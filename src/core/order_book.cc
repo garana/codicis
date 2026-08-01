@@ -142,8 +142,11 @@ struct OrderBook::Impl {
   Ladder bids{Side::Buy};
   Ladder asks{Side::Sell};
   std::unordered_map<OrderId, Entry> orders;
+  std::unordered_map<OrderId, Order> stops;  // parked, awaiting a trigger
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
+  bool have_last = false;
+  Ticks last_price = 0;
 
   /** @return The ladder for side s. */
   Ladder& ladder(Side s) { return s == Side::Buy ? bids : asks; }
@@ -254,6 +257,8 @@ struct OrderBook::Impl {
                                .taker_side = o.side,
                                .price = bp,
                                .qty = fill});
+        last_price = bp;  // stop-trigger reference
+        have_last = true;
         o.leaves -= fill;
         o.filled += fill;
         me.order.leaves -= fill;
@@ -284,6 +289,115 @@ struct OrderBook::Impl {
     own.on_added(o.price);
     orders.emplace(o.id, Entry{.order = o, .pos = it});
   }
+
+  /**
+   * @brief Whether a stop's trigger condition is met at price @p px.
+   *
+   * A buy stop sits above the market and fires as price rises to it; a sell
+   * stop sits below and fires as price falls to it.
+   * @param o  The stop order (o.trigger must be set).
+   * @param px The reference (last trade) price.
+   * @return True if the stop should fire.
+   */
+  bool stop_triggered(const Order& o, Ticks px) const {
+    if (!o.trigger.has_value()) {
+      return false;
+    }
+    const Ticks sp = o.trigger->stop_price;
+    return o.side == Side::Buy ? px >= sp : px <= sp;
+  }
+
+  /**
+   * @brief Initialize a trailing stop's high-water mark and stop price.
+   * @param o The stop order (mutated).
+   */
+  void arm_stop(Order& o) {
+    if (!o.trigger.has_value()) {
+      return;
+    }
+    TriggerSpec& t = *o.trigger;
+    if (t.kind == TriggerSpec::Kind::Stop) {
+      return;  // fixed stop price, nothing to seed
+    }
+    const Ticks ref = have_last ? last_price : t.stop_price;
+    t.high_water = ref;
+    // Sell stop trails below the peak; buy stop trails above the trough.
+    t.stop_price = o.side == Side::Sell ? ref - t.trail_by : ref + t.trail_by;
+  }
+
+  /**
+   * @brief Re-anchor a trailing stop after a favorable price move.
+   * @param o  The stop order (mutated).
+   * @param px The new reference price.
+   */
+  void update_trail(Order& o, Ticks px) {
+    if (!o.trigger.has_value()) {
+      return;
+    }
+    TriggerSpec& t = *o.trigger;
+    if (t.kind == TriggerSpec::Kind::Stop) {
+      return;
+    }
+    if (o.side == Side::Sell) {
+      if (px > t.high_water) {
+        t.high_water = px;
+        t.stop_price = px - t.trail_by;
+      }
+    } else {
+      if (px < t.high_water) {
+        t.high_water = px;
+        t.stop_price = px + t.trail_by;
+      }
+    }
+  }
+
+  /**
+   * @brief Inject a triggered stop as a plain market/limit order.
+   * @param o      The now-active order (mutated).
+   * @param trades Output executions (appended).
+   */
+  void inject(Order& o, std::vector<Trade>& trades) {
+    match(o, trades);
+    if (o.leaves > 0 && o.type != OrdType::Market && o.tif != Tif::IOC) {
+      rest(o);
+    }
+  }
+
+  /**
+   * @brief Fire every stop whose trigger is met, cascading until quiescent.
+   *
+   * A triggered order can move the last price and set off further stops, so we
+   * loop. Firing order within a round is by arrival sequence for determinism.
+   * @param trades Output executions (appended).
+   */
+  void evaluate_stops(std::vector<Trade>& trades) {
+    for (;;) {
+      std::vector<OrderId> fire;
+      for (auto& [id, so] : stops) {
+        if (have_last) {
+          update_trail(so, last_price);
+        }
+        if (have_last && stop_triggered(so, last_price)) {
+          fire.push_back(id);
+        }
+      }
+      if (fire.empty()) {
+        return;
+      }
+      std::sort(fire.begin(), fire.end(),
+                [&](OrderId a, OrderId b) {
+                  return stops.at(a).seq < stops.at(b).seq;
+                });
+      for (const OrderId id : fire) {
+        Order o = stops.at(id);
+        stops.erase(id);
+        if (o.trigger.has_value()) {
+          o.trigger->triggered = true;
+        }
+        inject(o, trades);
+      }
+    }
+  }
 };
 
 OrderBook::OrderBook() : impl_(std::make_unique<Impl>()) {}
@@ -311,9 +425,28 @@ SubmitOutcome OrderBook::submit(Order order) {
     out.reject_reason = "non-positive limit price";
     return out;
   }
-  if (impl_->orders.find(order.id) != impl_->orders.end()) {
+  if (impl_->orders.find(order.id) != impl_->orders.end() ||
+      impl_->stops.find(order.id) != impl_->stops.end()) {
     out.accepted = false;
     out.reject_reason = "duplicate order id";
+    return out;
+  }
+
+  // Stop / trailing orders: park until the trigger fires (or fire now if the
+  // reference price is already past it), rather than matching immediately.
+  if (order.trigger.has_value() && !order.trigger->triggered) {
+    impl_->arm_stop(order);
+    if (impl_->have_last && impl_->stop_triggered(order, impl_->last_price)) {
+      order.trigger->triggered = true;
+      impl_->inject(order, out.trades);
+      out.filled = order.filled;
+      out.rested = order.leaves > 0 && order.type != OrdType::Market &&
+                   order.tif != Tif::IOC;
+      impl_->evaluate_stops(out.trades);
+    } else {
+      impl_->stops.emplace(order.id, order);
+      out.pending_trigger = true;
+    }
     return out;
   }
 
@@ -359,10 +492,20 @@ SubmitOutcome OrderBook::submit(Order order) {
       out.rested = true;
     }
   }
+
+  // Any trade may have moved the last price into a stop's trigger; cascade.
+  if (!out.trades.empty()) {
+    impl_->evaluate_stops(out.trades);
+  }
   return out;
 }
 
 bool OrderBook::cancel(OrderId id) {
+  // A parked stop order may be cancelled before it triggers.
+  if (const auto s = impl_->stops.find(id); s != impl_->stops.end()) {
+    impl_->stops.erase(s);
+    return true;
+  }
   const auto it = impl_->orders.find(id);
   if (it == impl_->orders.end()) {
     return false;
@@ -412,6 +555,18 @@ std::vector<OrderId> OrderBook::expire(Timestamp now) {
   return expired;
 }
 
+bool OrderBook::last_trade_price(Ticks* out) const {
+  if (!impl_->have_last) {
+    return false;
+  }
+  *out = impl_->last_price;
+  return true;
+}
+
 std::size_t OrderBook::resting_count() const { return impl_->orders.size(); }
+
+std::size_t OrderBook::pending_stop_count() const {
+  return impl_->stops.size();
+}
 
 }  // namespace codicis

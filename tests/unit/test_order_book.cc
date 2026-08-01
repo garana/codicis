@@ -37,6 +37,52 @@ Order Market(OrderId id, Side side, Quantity qty) {
   return o;
 }
 
+/** @brief Build a stop-market order (becomes a market order when triggered). */
+Order StopMarket(OrderId id, Side side, Ticks stop, Quantity qty) {
+  Order o = Market(id, side, qty);
+  TriggerSpec t;
+  t.kind = TriggerSpec::Kind::Stop;
+  t.stop_price = stop;
+  o.trigger = t;
+  return o;
+}
+
+/** @brief Build a stop-limit order (becomes a limit order when triggered). */
+Order StopLimit(OrderId id, Side side, Ticks stop, Ticks limit, Quantity qty) {
+  Order o = Limit(id, side, limit, qty);
+  TriggerSpec t;
+  t.kind = TriggerSpec::Kind::Stop;
+  t.stop_price = stop;
+  o.trigger = t;
+  return o;
+}
+
+/** @brief Build a trailing-stop-market order with a fixed trail amount. */
+Order TrailingStop(OrderId id, Side side, Ticks trail, Quantity qty) {
+  Order o = Market(id, side, qty);
+  TriggerSpec t;
+  t.kind = TriggerSpec::Kind::TrailAmount;
+  t.trail_by = trail;
+  o.trigger = t;
+  return o;
+}
+
+/** @brief Force a trade at @p px so the book has a last price; leaves it empty. */
+void SeedLast(OrderBook& book, Ticks px, OrderId* next_id) {
+  book.submit(Limit((*next_id)++, Side::Sell, px, 1));
+  book.submit(Limit((*next_id)++, Side::Buy, px, 1));
+}
+
+/** @return True if any trade in the outcome has taker @p id. */
+bool HasTaker(const SubmitOutcome& out, OrderId id) {
+  for (const Trade& t : out.trades) {
+    if (t.taker_id == id) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 TEST_CASE("Normalize collapses convenience TIFs", "[core][order]") {
@@ -254,6 +300,102 @@ TEST_CASE("Expiry cancels timed-out resting orders", "[core][tif]") {
   REQUIRE(expired[0] == 1);
   REQUIRE(book.find(1) == nullptr);
   REQUIRE(book.find(2) != nullptr);
+}
+
+TEST_CASE("Stop-market parks then fires when price crosses the stop",
+          "[core][stop]") {
+  OrderBook book;
+  OrderId id = 1;
+  SeedLast(book, 100, &id);          // last = 100, book empty
+  book.submit(Limit(id++, Side::Sell, 106, 10));  // liquidity for the stop
+  book.submit(Limit(id++, Side::Sell, 110, 10));
+
+  const OrderId stop_id = id++;
+  SubmitOutcome parked = book.submit(StopMarket(stop_id, Side::Buy, 105, 5));
+  REQUIRE(parked.accepted);
+  REQUIRE(parked.pending_trigger);
+  REQUIRE(book.pending_stop_count() == 1);
+
+  // A trade at 106 pushes the last price past the 105 stop.
+  const OrderId trig = id++;
+  SubmitOutcome out = book.submit(Limit(trig, Side::Buy, 106, 1));
+  REQUIRE(book.pending_stop_count() == 0);
+  REQUIRE(HasTaker(out, stop_id));           // the stop executed in this cascade
+  REQUIRE(book.total_qty_at(Side::Sell, 106) == 4);  // 10 - 1 - 5
+}
+
+TEST_CASE("Triggered stop-limit can rest instead of trading", "[core][stop]") {
+  OrderBook book;
+  OrderId id = 1;
+  SeedLast(book, 100, &id);
+  book.submit(Limit(id++, Side::Sell, 106, 10));
+
+  // Buy stop-limit: trigger 105, limit 105 (won't cross the 106 ask).
+  const OrderId stop_id = id++;
+  book.submit(StopLimit(stop_id, Side::Buy, 105, 105, 5));
+  REQUIRE(book.pending_stop_count() == 1);
+
+  book.submit(Limit(id++, Side::Buy, 106, 1));  // trade at 106 -> triggers
+  REQUIRE(book.pending_stop_count() == 0);
+  REQUIRE(book.find(stop_id) != nullptr);       // rested as a limit
+  Ticks bid = 0;
+  REQUIRE(book.best_bid(&bid));
+  REQUIRE(bid == 105);
+}
+
+TEST_CASE("Trailing stop re-anchors on favorable moves", "[core][stop]") {
+  OrderBook book;
+  OrderId id = 1;
+  SeedLast(book, 100, &id);
+  book.submit(Limit(id++, Side::Buy, 80, 20));  // deep bid for the exit
+
+  // Sell trailing stop, trail 5: armed stop = 100 - 5 = 95.
+  const OrderId stop_id = id++;
+  book.submit(TrailingStop(stop_id, Side::Sell, 5, 5));
+  REQUIRE(book.pending_stop_count() == 1);
+
+  SeedLast(book, 110, &id);  // peak rises -> stop trails up to 105
+  REQUIRE(book.pending_stop_count() == 1);
+
+  SeedLast(book, 106, &id);  // above the trailed stop (105): no trigger
+  REQUIRE(book.pending_stop_count() == 1);
+
+  SeedLast(book, 105, &id);  // touches the trailed stop -> fires
+  REQUIRE(book.pending_stop_count() == 0);
+  Ticks last = 0;
+  REQUIRE(book.last_trade_price(&last));
+}
+
+TEST_CASE("A triggered stop can cascade into another", "[core][stop]") {
+  OrderBook book;
+  OrderId id = 1;
+  SeedLast(book, 100, &id);
+  book.submit(Limit(id++, Side::Sell, 106, 5));
+  book.submit(Limit(id++, Side::Sell, 108, 5));
+
+  const OrderId s1 = id++;
+  const OrderId s2 = id++;
+  book.submit(StopMarket(s1, Side::Buy, 105, 5));
+  book.submit(StopMarket(s2, Side::Buy, 107, 5));
+  REQUIRE(book.pending_stop_count() == 2);
+
+  // One trade at 106 fires s1, whose market buy walks price to 108, firing s2.
+  SubmitOutcome out = book.submit(Limit(id++, Side::Buy, 106, 1));
+  REQUIRE(book.pending_stop_count() == 0);
+  REQUIRE(HasTaker(out, s1));
+  REQUIRE(HasTaker(out, s2));
+}
+
+TEST_CASE("A parked stop can be cancelled before triggering", "[core][stop]") {
+  OrderBook book;
+  OrderId id = 1;
+  SeedLast(book, 100, &id);
+  const OrderId stop_id = id++;
+  book.submit(StopMarket(stop_id, Side::Buy, 105, 5));
+  REQUIRE(book.pending_stop_count() == 1);
+  REQUIRE(book.cancel(stop_id));
+  REQUIRE(book.pending_stop_count() == 0);
+  REQUIRE_FALSE(book.cancel(stop_id));
 }
 
 TEST_CASE("Cancel removes a resting order and updates the top",
