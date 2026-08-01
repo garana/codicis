@@ -17,6 +17,8 @@ if(NOT TARGET Catch2::Catch2WithMain)
       ${_codicis_catch_dir}/catch_amalgamated.cpp)
     target_include_directories(codicis_catch2 PUBLIC ${_codicis_catch_dir})
     target_compile_features(codicis_catch2 PUBLIC cxx_std_20)
+    # Never lint the vendored third-party amalgamation.
+    set_target_properties(codicis_catch2 PROPERTIES CXX_CLANG_TIDY "")
     add_library(Catch2::Catch2WithMain ALIAS codicis_catch2)
     message(STATUS "codicis: using vendored Catch2 (amalgamated)")
   else()

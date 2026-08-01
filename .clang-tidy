@@ -1,0 +1,32 @@
+# clang-tidy configuration for codicis.
+#
+# Opt-in during the build via -DCODICIS_CLANG_TIDY=ON, or run standalone:
+#   clang-tidy -p build <file.cc>
+#
+# The set is deliberately conservative: correctness/bug-pattern families are
+# on; the noisiest stylistic checks are disabled so findings stay actionable.
+Checks: >
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  misc-*,
+  modernize-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -misc-const-correctness,
+  -modernize-avoid-c-arrays,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -modernize-use-ranges,
+  -performance-enum-size
+
+# Do not fail the build on findings; treat them as warnings to triage.
+WarningsAsErrors: ''
+
+# Only analyze our own headers (not third_party or system headers).
+HeaderFilterRegex: '.*/include/codicis/.*'
+
+FormatStyle: file

@@ -1,0 +1,6 @@
+# Formatting for codicis: Google style at an 80-column width, which the
+# codebase already follows. Run: clang-format -i <file>.
+BasedOnStyle: Google
+ColumnLimit: 80
+DerivePointerAlignment: false
+PointerAlignment: Left

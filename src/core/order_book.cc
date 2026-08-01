@@ -249,7 +249,11 @@ struct OrderBook::Impl {
         }
 
         const Quantity fill = std::min(o.leaves, me.order.leaves);
-        trades.push_back(Trade{o.id, mid, o.side, bp, fill});
+        trades.push_back(Trade{.taker_id = o.id,
+                               .maker_id = mid,
+                               .taker_side = o.side,
+                               .price = bp,
+                               .qty = fill});
         o.leaves -= fill;
         o.filled += fill;
         me.order.leaves -= fill;
@@ -278,7 +282,7 @@ struct OrderBook::Impl {
     auto it = std::prev(lvl.fifo.end());
     lvl.total += o.leaves;
     own.on_added(o.price);
-    orders.emplace(o.id, Entry{o, it});
+    orders.emplace(o.id, Entry{.order = o, .pos = it});
   }
 };
 
