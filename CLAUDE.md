@@ -170,7 +170,14 @@ Linux (CI/container) during hardening.
       reference `codicis_storage_helper` child binary. Codec/round-trip +
       socketpair client + storage outbox tests + real spawned-helper
       integration. Green.
-- [ ] P6 App wiring and core seam
+- [x] P6 App wiring and core seam: `codicis` executable. Config-driven
+      startup (BuildOptionRegistry), spawns the storage helper, and serves a
+      REST API on the event loop wiring net -> core -> ipc: `GET /health`,
+      `POST /orders` (form body -> matching engine), `POST /orders/cancel`,
+      `GET /book`. Matched orders/trades are reported to the storage helper and
+      committed on a periodic timer. End-to-end app test (spawned helper) plus
+      a verified curl smoke test. NB: strict report-before-place ordering and
+      async HTTP responses are deferred to OT8.
 - [~] OT0-OT8 Order types (matching engine) -- in progress:
       - [x] OT0 domain types (integer-tick prices, SeqNo time priority,
             orthogonal type/TIF/flag axes + optional trigger/peg/link payloads)

@@ -7,8 +7,35 @@ persistence to child-process helpers communicating over pipes.
 
 ## Status
 
-Early development. Phase P0 (build skeleton and utilities) is complete and the
-test suite is green. See the roadmap below and `CLAUDE.md` for details.
+Under active development. The full infrastructure (config, event loop, HTTP +
+WebSocket, IPC helper framework) and the matching-engine foundation
+(Market/Limit with core time-in-force) are complete, wired into a runnable
+`codicis` server with a REST API. The suite is green. See the roadmap below and
+`CLAUDE.md` for details.
+
+## Running
+
+```
+cmake -S . -B build && cmake --build build
+./build/src/app/codicis \
+    --net.http_port=8080 \
+    --storage.helper_cmd=build/tools/storage_helper/codicis_storage_helper
+```
+
+Then, for example:
+
+```
+curl -s localhost:8080/health
+curl -s -X POST --data 'side=sell&type=limit&price=100&qty=10' \
+    localhost:8080/orders
+curl -s localhost:8080/book
+curl -s -X POST --data 'side=buy&type=limit&price=105&qty=4' \
+    localhost:8080/orders   # crosses; trades at the maker price 100
+curl -s -X POST --data 'id=1' localhost:8080/orders/cancel
+```
+
+Every option is also settable via a config file (see
+`config/codicis.example.conf`); CLI flags override file values.
 
 ## Design highlights
 
