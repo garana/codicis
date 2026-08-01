@@ -79,10 +79,18 @@ struct TriggerSpec {
 
 /** @brief Pegged-order specification (conditional axis). */
 struct PegSpec {
-  enum class Ref : std::uint8_t { PrimaryBid, PrimaryAsk, Opposite, Midpoint };
+  /**
+   * @brief Peg reference, resolved against the side of the order.
+   *  - Primary: the same-side best (buy pegs to best bid, sell to best ask).
+   *  - Market:  the opposite-side best (buy pegs to best ask, sell to bid).
+   *  - Midpoint: the midpoint of the best bid and ask.
+   * The reference is computed over non-pegged orders only, so pegs never chase
+   * themselves.
+   */
+  enum class Ref : std::uint8_t { Primary, Market, Midpoint };
   Ref ref = Ref::Midpoint;
-  Ticks offset = 0;
-  Ticks cap_limit = 0;  /**< 0 means no cap. */
+  Ticks offset = 0;     /**< Signed tick offset added to the reference. */
+  Ticks cap_limit = 0;  /**< Protective limit; 0 means none. */
 };
 
 /** @brief Linked/contingent order specification (conditional axis). */

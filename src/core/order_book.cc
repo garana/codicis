@@ -9,6 +9,8 @@
 #include <deque>
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace codicis {
 namespace {
@@ -162,6 +164,7 @@ struct OrderBook::Impl {
   Ladder asks{Side::Sell};
   std::unordered_map<OrderId, Entry> orders;
   std::unordered_map<OrderId, Order> stops;  // parked, awaiting a trigger
+  std::unordered_set<OrderId> pegged;        // resting orders that reprice
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
   bool have_last = false;
@@ -297,6 +300,7 @@ struct OrderBook::Impl {
         if (me.order.leaves == 0) {
           lvl->fifo.pop_front();
           orders.erase(mid);
+          pegged.erase(mid);  // no-op unless it was a pegged order
         } else if (iceberg && me.slice == 0) {
           // Slice exhausted: replenish from the reserve and re-queue at the
           // back of the level, losing time priority (standard iceberg rule).
@@ -440,6 +444,152 @@ struct OrderBook::Impl {
       }
     }
   }
+
+  /**
+   * @brief Best price on a side considering only non-pegged orders.
+   *
+   * Pegs reference this so they never chase their own quotes.
+   * @param side The side to inspect.
+   * @param out  Receives the best non-pegged price on success.
+   * @return True if a non-pegged order rests on that side.
+   */
+  bool reference_best(Side side, Ticks* out) {
+    Ladder& L = ladder(side);
+    if (!L.has_base) {
+      return false;
+    }
+    auto has_nonpeg = [&](const Level& lvl) {
+      for (const OrderId id : lvl.fifo) {
+        const auto it = orders.find(id);
+        if (it != orders.end() && !it->second.order.peg.has_value()) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const std::size_t n = L.levels.size();
+    if (side == Side::Buy) {
+      for (std::size_t i = n; i-- > 0;) {
+        if (L.levels[i].total > 0 && has_nonpeg(L.levels[i])) {
+          *out = L.base + static_cast<Ticks>(i);
+          return true;
+        }
+      }
+    } else {
+      for (std::size_t i = 0; i < n; ++i) {
+        if (L.levels[i].total > 0 && has_nonpeg(L.levels[i])) {
+          *out = L.base + static_cast<Ticks>(i);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief Compute a pegged order's price from the reference BBO.
+   * @param o   The pegged order (o.peg must be set).
+   * @param out Receives the computed price on success.
+   * @return True if a valid price could be computed (reference available).
+   */
+  bool compute_peg_price(const Order& o, Ticks* out) {
+    if (!o.peg.has_value()) {
+      return false;
+    }
+    Ticks rb = 0;
+    Ticks ra = 0;
+    const bool hb = reference_best(Side::Buy, &rb);
+    const bool ha = reference_best(Side::Sell, &ra);
+    const PegSpec& p = *o.peg;
+    Ticks ref = 0;
+    switch (p.ref) {
+      case PegSpec::Ref::Primary:
+        if (o.side == Side::Buy) {
+          if (!hb) return false;
+          ref = rb;
+        } else {
+          if (!ha) return false;
+          ref = ra;
+        }
+        break;
+      case PegSpec::Ref::Market:
+        if (o.side == Side::Buy) {
+          if (!ha) return false;
+          ref = ra;
+        } else {
+          if (!hb) return false;
+          ref = rb;
+        }
+        break;
+      case PegSpec::Ref::Midpoint:
+        if (!hb || !ha) return false;
+        ref = (rb + ra) / 2;  // floor; sub-tick midpoints round down
+        break;
+    }
+    Ticks price = ref + p.offset;
+    if (p.cap_limit > 0) {
+      price = o.side == Side::Buy ? std::min(price, p.cap_limit)
+                                  : std::max(price, p.cap_limit);
+    }
+    if (price <= 0) {
+      return false;
+    }
+    *out = price;
+    return true;
+  }
+
+  /**
+   * @brief Move a resting pegged order to a new price (loses time priority).
+   * @param id        The pegged order id.
+   * @param new_price The recomputed price.
+   */
+  void move_pegged(OrderId id, Ticks new_price) {
+    Entry& e = orders.at(id);
+    Ladder& L = ladder(e.order.side);
+    if (Level* lvl = L.at(e.order.price); lvl != nullptr) {
+      lvl->total -= e.order.leaves;
+      lvl->displayed -= DisplayedOf(e.order.flags, e.order.leaves, e.slice);
+      lvl->fifo.erase(e.pos);
+      if (lvl->total == 0) {
+        L.on_removed(e.order.price);
+      }
+    }
+    e.order.price = new_price;
+    Level& nl = L.touch(new_price);
+    nl.fifo.push_back(id);
+    e.pos = std::prev(nl.fifo.end());
+    nl.total += e.order.leaves;
+    nl.displayed += DisplayedOf(e.order.flags, e.order.leaves, e.slice);
+    L.on_added(new_price);
+  }
+
+  /**
+   * @brief Recompute and re-place every pegged order after a BBO change.
+   *
+   * A single pass suffices: the reference excludes pegged orders, so moving
+   * one peg cannot change another's reference.
+   */
+  void reprice_pegs() {
+    if (pegged.empty()) {
+      return;
+    }
+    std::vector<OrderId> ids(pegged.begin(), pegged.end());
+    std::sort(ids.begin(), ids.end(), [&](OrderId a, OrderId b) {
+      return orders.at(a).order.seq < orders.at(b).order.seq;
+    });
+    for (const OrderId id : ids) {
+      const auto it = orders.find(id);
+      if (it == orders.end()) {
+        pegged.erase(id);  // filled or cancelled meanwhile
+        continue;
+      }
+      Ticks np = 0;
+      if (compute_peg_price(it->second.order, &np) &&
+          np != it->second.order.price) {
+        move_pegged(id, np);
+      }
+    }
+  }
 };
 
 OrderBook::OrderBook() : impl_(std::make_unique<Impl>()) {}
@@ -462,9 +612,10 @@ SubmitOutcome OrderBook::submit(Order order) {
     out.reject_reason = "non-positive quantity";
     return out;
   }
-  if (order.type == OrdType::Limit && order.price <= 0) {
+  if (order.type == OrdType::Limit && order.price <= 0 &&
+      !order.peg.has_value()) {
     out.accepted = false;
-    out.reject_reason = "non-positive limit price";
+    out.reject_reason = "non-positive limit price";  // pegs price later
     return out;
   }
   if (impl_->orders.find(order.id) != impl_->orders.end() ||
@@ -489,6 +640,23 @@ SubmitOutcome OrderBook::submit(Order order) {
       impl_->stops.emplace(order.id, order);
       out.pending_trigger = true;
     }
+    return out;
+  }
+
+  // Pegged orders rest at a price derived from the (non-pegged) BBO and
+  // reprice as it moves. They do not match on entry.
+  if (order.peg.has_value()) {
+    Ticks price = 0;
+    if (!impl_->compute_peg_price(order, &price)) {
+      out.accepted = false;
+      out.reject_reason = "no reference price for peg";
+      return out;
+    }
+    order.type = OrdType::Limit;
+    order.price = price;
+    impl_->rest(order);
+    impl_->pegged.insert(order.id);
+    out.rested = true;
     return out;
   }
 
@@ -539,6 +707,8 @@ SubmitOutcome OrderBook::submit(Order order) {
   if (!out.trades.empty()) {
     impl_->evaluate_stops(out.trades);
   }
+  // The book (and thus the reference BBO) may have moved; reprice pegs.
+  impl_->reprice_pegs();
   return out;
 }
 
@@ -552,6 +722,7 @@ bool OrderBook::cancel(OrderId id) {
   if (it == impl_->orders.end()) {
     return false;
   }
+  const bool was_pegged = impl_->pegged.erase(id) > 0;
   Impl::Entry& e = it->second;
   const Side side = e.order.side;
   const Ticks price = e.order.price;
@@ -567,6 +738,10 @@ bool OrderBook::cancel(OrderId id) {
     }
   }
   impl_->orders.erase(it);
+  // Cancelling a non-pegged order can move the reference BBO.
+  if (!was_pegged) {
+    impl_->reprice_pegs();
+  }
   return true;
 }
 

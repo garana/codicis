@@ -261,6 +261,14 @@ Linux (CI/container) during hardening.
             the matchable view. (Reduce-Only needs a position/risk layer and
             Discretionary needs a hidden price band in matching -- both still
             TODO within OT4.)
-      - [ ] OT4 remainder (reduce-only, discretionary), OT5 pegged,
-            OT6 OCO/OTO/bracket, OT7 auctions, OT8 storage determinism.
+      - [x] OT5 pegged: Primary (same-side best), Market (opposite-side best),
+            and Midpoint pegs with a signed offset and protective cap. Pegs
+            rest in the ladder (matchable) but their price derives from the
+            reference BBO computed over NON-pegged orders only (so they never
+            chase themselves); a single reprice pass runs after any book event.
+            Repricing moves the order (time-priority loss). NB: a peg that
+            reprices to a marketable price rests there and matches on the next
+            aggressor rather than auto-matching -- a documented simplification.
+      - [ ] OT4 remainder (reduce-only, discretionary), OT6 OCO/OTO/bracket,
+            OT7 auctions, OT8 storage determinism.
 - [ ] H1-H2 Hardening (TLS + robustness)

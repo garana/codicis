@@ -89,6 +89,23 @@ void SeedLast(OrderBook& book, Ticks px, OrderId* next_id) {
   book.submit(Limit((*next_id)++, Side::Buy, px, 1));
 }
 
+/** @brief Build a pegged order. */
+Order Peg(OrderId id, Side side, PegSpec::Ref ref, Ticks offset, Quantity qty,
+          Ticks cap = 0) {
+  Order o;
+  o.id = id;
+  o.side = side;
+  o.type = OrdType::Limit;
+  o.tif = Tif::GTC;
+  o.qty = qty;
+  PegSpec p;
+  p.ref = ref;
+  p.offset = offset;
+  p.cap_limit = cap;
+  o.peg = p;
+  return o;
+}
+
 /** @return True if any trade in the outcome has taker @p id. */
 bool HasTaker(const SubmitOutcome& out, OrderId id) {
   for (const Trade& t : out.trades) {
@@ -442,6 +459,81 @@ TEST_CASE("Hidden orders match but are not displayed", "[core][hidden]") {
   REQUIRE(out.trades[0].qty == 4);
   REQUIRE(book.total_qty_at(Side::Buy, 100) == 6);
   REQUIRE(book.displayed_qty_at(Side::Buy, 100) == 0);
+}
+
+TEST_CASE("Midpoint peg sits at the midpoint and reprices on BBO moves",
+          "[core][peg]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+
+  book.submit(Peg(3, Side::Buy, PegSpec::Ref::Midpoint, 0, 5));
+  REQUIRE(book.find(3) != nullptr);
+  REQUIRE(book.find(3)->price == 105);  // (100 + 110) / 2
+
+  book.submit(Limit(4, Side::Buy, 104, 5));  // best non-peg bid -> 104
+  REQUIRE(book.find(3)->price == 107);       // (104 + 110) / 2
+  REQUIRE(book.total_qty_at(Side::Buy, 105) == 0);
+  REQUIRE(book.total_qty_at(Side::Buy, 107) == 5);
+}
+
+TEST_CASE("Primary peg tracks the same-side best", "[core][peg]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+
+  book.submit(Peg(3, Side::Buy, PegSpec::Ref::Primary, 0, 5));
+  REQUIRE(book.find(3)->price == 100);            // joins the best bid
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 10);
+
+  book.submit(Limit(4, Side::Buy, 103, 5));       // best non-peg bid -> 103
+  REQUIRE(book.find(3)->price == 103);
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 5);   // only order 1 left here
+  REQUIRE(book.total_qty_at(Side::Buy, 103) == 10);  // order 4 + peg
+}
+
+TEST_CASE("Market peg references the opposite side, with an offset",
+          "[core][peg]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+
+  // Sell market peg references the best bid (100) + 8 = 108 (passive).
+  book.submit(Peg(3, Side::Sell, PegSpec::Ref::Market, 8, 5));
+  REQUIRE(book.find(3)->price == 108);
+
+  book.submit(Limit(4, Side::Buy, 102, 5));  // best bid -> 102
+  REQUIRE(book.find(3)->price == 110);       // 102 + 8
+}
+
+TEST_CASE("Peg cap limits the price", "[core][peg]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+  // Midpoint would be 105, but the buy cap of 103 clamps it.
+  book.submit(Peg(3, Side::Buy, PegSpec::Ref::Midpoint, 0, 5, /*cap=*/103));
+  REQUIRE(book.find(3)->price == 103);
+}
+
+TEST_CASE("Peg with no reference is rejected", "[core][peg]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));  // no ask -> no midpoint reference
+  SubmitOutcome out = book.submit(Peg(2, Side::Buy, PegSpec::Ref::Midpoint, 0,
+                                      5));
+  REQUIRE_FALSE(out.accepted);
+}
+
+TEST_CASE("A resting peg is matchable when crossed", "[core][peg]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+  book.submit(Peg(3, Side::Buy, PegSpec::Ref::Midpoint, 0, 5));  // bid @ 105
+
+  SubmitOutcome out = book.submit(Limit(4, Side::Sell, 105, 3));  // hits the peg
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].maker_id == 3);
+  REQUIRE(out.trades[0].price == 105);
+  REQUIRE(book.total_qty_at(Side::Buy, 105) == 2);  // peg remainder
 }
 
 TEST_CASE("A parked stop can be cancelled before triggering", "[core][stop]") {
