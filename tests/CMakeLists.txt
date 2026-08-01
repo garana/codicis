@@ -49,6 +49,10 @@ add_dependencies(test_ipc codicis_storage_helper)
 target_compile_definitions(test_ipc PRIVATE
   CODICIS_STORAGE_HELPER_PATH="$<TARGET_FILE:codicis_storage_helper>")
 
+codicis_add_test(test_engine
+  unit/test_engine.cc)
+target_link_libraries(test_engine PRIVATE codicis_engine)
+
 codicis_add_test(test_app
   unit/test_app.cc)
 target_link_libraries(test_app PRIVATE codicis_app)

@@ -78,6 +78,15 @@ class StorageClient {
       std::vector<std::pair<std::string, std::string>> fields, ReportFn cb);
 
   /**
+   * @brief Report an order fill (partial or complete) to storage.
+   * @param fields The fill fields to persist.
+   * @param cb     Completion callback (may be empty).
+   * @return The assigned req_id (also the outbox key).
+   */
+  std::uint64_t report_fill(
+      std::vector<std::pair<std::string, std::string>> fields, ReportFn cb);
+
+  /**
    * @brief Ask the helper to commit; drop committed entries on confirmation.
    * @param cb Completion callback (may be empty).
    */

@@ -275,6 +275,19 @@ Linux (CI/container) during hardening.
             fully fills; a bracket is OTO + OCO -- the entry's fill releases
             take-profit and stop-loss as a mutually-cancelling OCO pair.
             Child release re-enters submit (trades cascade into the outcome).
-      - [ ] OT4 remainder (reduce-only, discretionary), OT7 auctions,
-            OT8 storage determinism.
+      - [~] OT8 storage determinism (engine done; app wiring + windowing TODO):
+            `TradingEngine` (src/engine) enforces report-before-place -- each
+            order is reported to the storage helper FIRST and placed only on
+            ack -- with a staging buffer that keeps placement in arrival-seq
+            order even when acks return out of order. On placement it reports
+            every trade (both order ids) and each affected order's fill
+            (partial/complete, taker + makers) via new StorageClient
+            report_fill. A failed pre-report does not place the order. Tested
+            over a socketpair helper.
+            TODO: (a) wire AppServer to the engine (needs async HTTP
+            responses, since the match result isn't known until after the ack);
+            (b) pull-levels-on-demand, which first needs top-of-book windowing
+            (level eviction) -- currently the book holds all levels in memory,
+            so there are no non-resident levels to pull.
+      - [ ] OT4 remainder (reduce-only, discretionary), OT7 auctions.
 - [ ] H1-H2 Hardening (TLS + robustness)

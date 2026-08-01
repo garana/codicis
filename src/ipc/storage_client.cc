@@ -39,6 +39,11 @@ std::uint64_t StorageClient::report_trade(
   return report("report_trade", "trade", std::move(fields), std::move(cb));
 }
 
+std::uint64_t StorageClient::report_fill(
+    std::vector<std::pair<std::string, std::string>> fields, ReportFn cb) {
+  return report("report_fill", "fill", std::move(fields), std::move(cb));
+}
+
 void StorageClient::commit(CommitFn cb) {
   helper_.send(
       "commit", {},

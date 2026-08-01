@@ -51,7 +51,8 @@ void WriteAll(int fd, const std::string& data) {
 HelperMessage Handle(const HelperMessage& req, std::uint64_t* highest) {
   HelperMessage resp;
   resp.req_id = req.req_id;
-  if (req.type == "report_order" || req.type == "report_trade") {
+  if (req.type == "report_order" || req.type == "report_trade" ||
+      req.type == "report_fill") {
     *highest = std::max(*highest, req.req_id);
     resp.type = req.type;
     resp.set("status", "ok");
