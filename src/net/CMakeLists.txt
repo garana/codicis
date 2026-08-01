@@ -5,7 +5,10 @@ add_library(codicis_net STATIC
   http_parser.cc
   router.cc
   listener.cc
-  http_server.cc)
+  http_server.cc
+  ws_frame.cc
+  ws_handshake.cc
+  websocket.cc)
 
 target_include_directories(codicis_net PUBLIC
   ${CMAKE_SOURCE_DIR}/include)

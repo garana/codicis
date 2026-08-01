@@ -5,10 +5,12 @@
 
 #include "catch_amalgamated.hpp"
 
+#include "codicis/util/base64.h"
 #include "codicis/util/buffer.h"
 #include "codicis/util/clock.h"
 #include "codicis/util/logging.h"
 #include "codicis/util/result.h"
+#include "codicis/util/sha1.h"
 
 #include <cstring>
 #include <string>
@@ -79,6 +81,25 @@ TEST_CASE("ManualClock advances deterministically", "[util][clock]") {
   REQUIRE(clock.now() == 1500);
   clock.set(42);
   REQUIRE(clock.now() == 42);
+}
+
+TEST_CASE("Base64 encodes known vectors", "[util][base64]") {
+  REQUIRE(Base64Encode(std::string("")) == "");
+  REQUIRE(Base64Encode(std::string("M")) == "TQ==");
+  REQUIRE(Base64Encode(std::string("Ma")) == "TWE=");
+  REQUIRE(Base64Encode(std::string("Man")) == "TWFu");
+  REQUIRE(Base64Encode(std::string("any carnal pleasure.")) ==
+          "YW55IGNhcm5hbCBwbGVhc3VyZS4=");
+}
+
+TEST_CASE("SHA-1 matches RFC 3174 vectors", "[util][sha1]") {
+  REQUIRE(Sha1Hex(Sha1(std::string("abc"))) ==
+          "a9993e364706816aba3e25717850c26c9cd0d89d");
+  REQUIRE(Sha1Hex(Sha1(std::string(""))) ==
+          "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+  REQUIRE(Sha1Hex(Sha1(std::string(
+              "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))) ==
+          "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
 }
 
 TEST_CASE("Log level parsing and thresholding", "[util][logging]") {

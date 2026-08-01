@@ -155,7 +155,12 @@ Linux (CI/container) during hardening.
       per-connection read/parse/route/write state machine and dispatch-safe
       teardown (EventLoop gained `defer()`). Parser unit tests + real loopback
       integration tests (GET/POST/404/405/keep-alive). Green.
-- [ ] P4 Net WebSocket
+- [x] P4 Net WebSocket: RFC 6455 frame codec (masking, extended lengths,
+      control-frame validation), hand-rolled SHA-1 + Base64 in util for the
+      Sec-WebSocket-Accept handshake, and a `WsServer`/`WsConnection` that
+      upgrades over the HTTP parser, reassembles fragmented messages, and
+      auto-handles ping/pong/close. Vector tests (accept key, RFC masked
+      frame, SHA-1/Base64) + real loopback echo integration. Green.
 - [ ] P5 IPC helper framework
 - [ ] P6 App wiring and core seam
 - [ ] OT0-OT8 Order types (matching engine)

@@ -32,3 +32,7 @@ target_link_libraries(test_http_parser PRIVATE codicis_net)
 codicis_add_test(test_http_server
   unit/test_http_server.cc)
 target_link_libraries(test_http_server PRIVATE codicis_net)
+
+codicis_add_test(test_ws
+  unit/test_ws.cc)
+target_link_libraries(test_ws PRIVATE codicis_net)
