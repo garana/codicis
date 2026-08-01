@@ -134,6 +134,47 @@ The full master plan lives at
   table. Do this when OT3-OT6 start populating those payloads. Cheaper partial
   win available first: reorder payload fields to group the 1-byte tags and cut
   internal padding (e.g. `TriggerSpec` 40 -> 32 bytes).
+- **Intrusive book + Order pool (decided).** Make the book intrusive: `Order`
+  carries its own doubly-linked prev/next hooks and lives in a fixed-size Order
+  pool -- a slab allocator over `mmap`'d chunks (huge pages where available;
+  LIFO free-list; O(1) alloc/free; single-threaded core, so no locking). The
+  price level's FIFO becomes an intrusive list threaded through the Order
+  nodes, removing the separate `std::list<OrderId>` node allocations; the
+  id->order index becomes `unordered_map<OrderId, Order*>` (consider an
+  intrusive hash hook or open-addressing map to drop those node allocs too).
+  Cancel stays O(1) by unlinking through the Order's own hooks; pool slot
+  addresses are stable, so pointers don't invalidate. `submit()` allocates a
+  node from the pool, fills it, and links it in; steady-state allocation
+  approaches zero (freed slots reused). This changes `Order` from a copied-by-
+  value POD into a pool-managed node that matching mutates in place. Composes
+  with the out-of-line `Conditional` owning pointer above. `std::pmr` over an
+  `unsynchronized_pool_resource` is an acceptable stepping stone, but the
+  target is the intrusive pool. Measure before committing.
+- **Parameterize numeric widths -- template Order (decided).** Make `Order`
+  (and `OrderBook`/matcher/`Trade`) a template over the numeric types, e.g.
+  `template<class Qty = std::uint64_t, class Px = std::int64_t,
+  class Notional = ...>` with defaults, so a market can select 64/128/256-bit
+  precision (`__int128`, or `intx::uint256` for full on-chain fidelity). Open
+  items to resolve when implementing:
+  - Signedness: `Quantity`/`Ticks` are currently `int64_t` (signed); the
+    requested default is `uint64_t` (unsigned). The matcher keeps quantities
+    non-negative, so unsigned works, but audit every subtraction
+    (`leaves -= fill`) and any reduce-only/position math before switching.
+  - Notional is a *separate, wider* parameter: `price * qty` needs more bits
+    than either factor (see the overflow analysis), so default it to at least
+    the sum of the Px+Qty bit-widths, or 128-bit.
+  - Heterogeneous widths in one process: a template is only *required* if the
+    same binary must run instruments of different widths (e.g. BTC `int64`
+    beside ETH 256-bit). If one deployment shares a single width, a build-time
+    typedef in `types.h` is simpler and keeps the pimpl compile firewall.
+    Decide which is needed -- it drives template-vs-typedef.
+  - Cost: templating the core moves `OrderBook`/matcher into headers, giving up
+    the current pimpl firewall and lengthening compiles; weigh against the
+    flexibility.
+  - Define a numeric concept (arithmetic + `<`/`==`/`min`) so custom types like
+    `intx::uint256` (which provide these) plug in and mis-instantiations fail
+    cleanly. Centralize `to_string`/parse -- the std lib formats neither 128-
+    nor 256-bit -- for storage-helper fields and JSON output.
 
 ## Build and test
 
