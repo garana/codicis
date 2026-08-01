@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <deque>
 #include <list>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -160,11 +161,21 @@ struct OrderBook::Impl {
     Quantity slice = 0;  /**< Iceberg visible slice remaining (else unused). */
   };
 
+  /** @brief A contingent-order group (OCO / OTO / bracket). */
+  struct Group {
+    OrderId parent = 0;               /**< OTO/bracket parent order id. */
+    std::vector<OrderId> oco_legs;    /**< Active mutually-cancelling legs. */
+    std::optional<Order> pending_child;  /**< OTO child, released on fill. */
+    std::vector<Order> pending_oco;   /**< Bracket TP/SL, released as OCO. */
+  };
+
   Ladder bids{Side::Buy};
   Ladder asks{Side::Sell};
   std::unordered_map<OrderId, Entry> orders;
   std::unordered_map<OrderId, Order> stops;  // parked, awaiting a trigger
   std::unordered_set<OrderId> pegged;        // resting orders that reprice
+  std::unordered_map<std::uint64_t, Group> groups;   // contingent groups
+  std::unordered_map<OrderId, std::uint64_t> order_group;  // linked -> group
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
   bool have_last = false;
@@ -625,6 +636,23 @@ SubmitOutcome OrderBook::submit(Order order) {
     return out;
   }
 
+  // Contingent children are held out of the book until their parent fills.
+  if (order.link.has_value()) {
+    const LinkSpec::Role role = order.link->role;
+    const std::uint64_t gid = order.link->group_id;
+    if (role == LinkSpec::Role::OtoChild) {
+      impl_->groups[gid].pending_child = order;
+      out.held = true;
+      return out;
+    }
+    if (role == LinkSpec::Role::BracketTakeProfit ||
+        role == LinkSpec::Role::BracketStopLoss) {
+      impl_->groups[gid].pending_oco.push_back(order);
+      out.held = true;
+      return out;
+    }
+  }
+
   // Stop / trailing orders: park until the trigger fires (or fire now if the
   // reference price is already past it), rather than matching immediately.
   if (order.trigger.has_value() && !order.trigger->triggered) {
@@ -709,7 +737,100 @@ SubmitOutcome OrderBook::submit(Order order) {
   }
   // The book (and thus the reference BBO) may have moved; reprice pegs.
   impl_->reprice_pegs();
+
+  // Register active contingent orders and react to any fills they had.
+  if (order.link.has_value()) {
+    const LinkSpec::Role role = order.link->role;
+    const std::uint64_t gid = order.link->group_id;
+    if (role == LinkSpec::Role::OcoLeg) {
+      impl_->groups[gid].oco_legs.push_back(order.id);
+    } else if (role == LinkSpec::Role::OtoParent ||
+               role == LinkSpec::Role::BracketParent) {
+      impl_->groups[gid].parent = order.id;
+    }
+    if (out.rested) {
+      impl_->order_group[order.id] = gid;
+    }
+  }
+  process_link_fills(order, out);
   return out;
+}
+
+void OrderBook::process_link_fills(const Order& submitted, SubmitOutcome& out) {
+  // Which linked orders filled in this submit? The aggressor itself, plus any
+  // resting linked makers that were hit.
+  std::vector<OrderId> filled;
+  if (submitted.link.has_value() && submitted.filled > 0) {
+    filled.push_back(submitted.id);
+  }
+  for (const Trade& t : out.trades) {
+    if (impl_->order_group.count(t.maker_id) > 0) {
+      filled.push_back(t.maker_id);
+    }
+  }
+  std::sort(filled.begin(), filled.end());
+  filled.erase(std::unique(filled.begin(), filled.end()), filled.end());
+
+  for (const OrderId id : filled) {
+    std::uint64_t gid = 0;
+    if (submitted.link.has_value() && id == submitted.id) {
+      gid = submitted.link->group_id;
+    } else if (const auto it = impl_->order_group.find(id);
+               it != impl_->order_group.end()) {
+      gid = it->second;
+    } else {
+      continue;
+    }
+    const auto git = impl_->groups.find(gid);
+    if (git == impl_->groups.end()) {
+      continue;
+    }
+
+    // OCO: a filled leg cancels its siblings.
+    std::vector<OrderId>& legs = git->second.oco_legs;
+    if (std::find(legs.begin(), legs.end(), id) != legs.end()) {
+      for (const OrderId other : legs) {
+        if (other != id) {
+          impl_->order_group.erase(other);
+          cancel(other);
+        }
+      }
+      legs.clear();
+      impl_->order_group.erase(id);
+    }
+
+    // Parent fully filled: release the group's children.
+    const bool fully = (submitted.link.has_value() && id == submitted.id)
+                           ? submitted.leaves == 0
+                           : impl_->orders.find(id) == impl_->orders.end();
+    if (impl_->groups[gid].parent == id && fully) {
+      release_children(gid, out);
+    }
+  }
+}
+
+void OrderBook::release_children(std::uint64_t gid, SubmitOutcome& out) {
+  // OTO: release the single pending child as an ordinary active order.
+  std::optional<Order> child;
+  child.swap(impl_->groups[gid].pending_child);
+  if (child.has_value()) {
+    Order c = *child;
+    c.link.reset();
+    const SubmitOutcome co = submit(c);
+    out.trades.insert(out.trades.end(), co.trades.begin(), co.trades.end());
+  }
+
+  // Bracket: release take-profit and stop-loss as a mutually-cancelling OCO.
+  std::vector<Order> pend;
+  pend.swap(impl_->groups[gid].pending_oco);
+  for (Order c : pend) {
+    LinkSpec link;
+    link.role = LinkSpec::Role::OcoLeg;
+    link.group_id = gid;
+    c.link = link;
+    const SubmitOutcome co = submit(c);
+    out.trades.insert(out.trades.end(), co.trades.begin(), co.trades.end());
+  }
 }
 
 bool OrderBook::cancel(OrderId id) {

@@ -47,6 +47,7 @@ struct SubmitOutcome {
   Quantity filled = 0;          /**< Total quantity executed. */
   bool rested = false;          /**< True if a remainder rests in the book. */
   bool pending_trigger = false; /**< True if parked awaiting a stop trigger. */
+  bool held = false;            /**< True if held as an OTO/bracket child. */
   OrderId order_id = 0;         /**< The submitted order's id. */
 };
 
@@ -163,6 +164,23 @@ class OrderBook {
   std::size_t pending_stop_count() const;
 
  private:
+  /**
+   * @brief React to fills of contingent (OCO/OTO/bracket) orders.
+   *
+   * Cancels OCO siblings and releases OTO/bracket children (which may match,
+   * appending their trades to @p out).
+   * @param submitted The order just submitted.
+   * @param out       The outcome to augment with cascade trades.
+   */
+  void process_link_fills(const Order& submitted, SubmitOutcome& out);
+
+  /**
+   * @brief Release the pending children of a group whose parent has filled.
+   * @param group_id The contingent group id.
+   * @param out      The outcome to augment with any child trades.
+   */
+  void release_children(std::uint64_t group_id, SubmitOutcome& out);
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

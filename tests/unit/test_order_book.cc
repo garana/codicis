@@ -89,6 +89,17 @@ void SeedLast(OrderBook& book, Ticks px, OrderId* next_id) {
   book.submit(Limit((*next_id)++, Side::Buy, px, 1));
 }
 
+/** @brief Build a contingent (linked) limit order. */
+Order Linked(OrderId id, Side side, Ticks price, Quantity qty,
+             LinkSpec::Role role, std::uint64_t group) {
+  Order o = Limit(id, side, price, qty);
+  LinkSpec l;
+  l.role = role;
+  l.group_id = group;
+  o.link = l;
+  return o;
+}
+
 /** @brief Build a pegged order. */
 Order Peg(OrderId id, Side side, PegSpec::Ref ref, Ticks offset, Quantity qty,
           Ticks cap = 0) {
@@ -546,6 +557,60 @@ TEST_CASE("A parked stop can be cancelled before triggering", "[core][stop]") {
   REQUIRE(book.cancel(stop_id));
   REQUIRE(book.pending_stop_count() == 0);
   REQUIRE_FALSE(book.cancel(stop_id));
+}
+
+TEST_CASE("OCO: filling one leg cancels the other", "[core][oco]") {
+  OrderBook book;
+  using Role = LinkSpec::Role;
+  book.submit(Linked(1, Side::Sell, 105, 5, Role::OcoLeg, 1));
+  book.submit(Linked(2, Side::Sell, 110, 5, Role::OcoLeg, 1));
+  REQUIRE(book.resting_count() == 2);
+
+  SubmitOutcome out = book.submit(Limit(3, Side::Buy, 105, 5));  // hits leg 1
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].maker_id == 1);
+  REQUIRE(book.find(1) == nullptr);   // filled
+  REQUIRE(book.find(2) == nullptr);   // sibling cancelled
+  REQUIRE(book.resting_count() == 0);
+}
+
+TEST_CASE("OTO: a child is held until the parent fills", "[core][oto]") {
+  OrderBook book;
+  using Role = LinkSpec::Role;
+  book.submit(Linked(1, Side::Buy, 100, 5, Role::OtoParent, 2));   // rests
+  SubmitOutcome child = book.submit(
+      Linked(2, Side::Sell, 110, 5, Role::OtoChild, 2));
+  REQUIRE(child.held);
+  REQUIRE(book.find(2) == nullptr);    // held, not in the book
+  REQUIRE(book.resting_count() == 1);  // only the parent
+
+  book.submit(Limit(3, Side::Sell, 100, 5));  // fills the parent
+  REQUIRE(book.find(1) == nullptr);
+  REQUIRE(book.find(2) != nullptr);    // child released into the book
+  Ticks ask = 0;
+  REQUIRE(book.best_ask(&ask));
+  REQUIRE(ask == 110);
+}
+
+TEST_CASE("Bracket: parent fill releases TP/SL as an OCO pair",
+          "[core][bracket]") {
+  OrderBook book;
+  using Role = LinkSpec::Role;
+  book.submit(Linked(1, Side::Buy, 100, 5, Role::BracketParent, 3));
+  book.submit(Linked(2, Side::Sell, 110, 5, Role::BracketTakeProfit, 3));
+  book.submit(Linked(3, Side::Sell, 95, 5, Role::BracketStopLoss, 3));
+  REQUIRE(book.resting_count() == 1);  // only the entry rests
+
+  book.submit(Limit(4, Side::Sell, 100, 5));  // fills the entry
+  REQUIRE(book.find(1) == nullptr);
+  REQUIRE(book.find(2) != nullptr);   // take-profit now rests
+  REQUIRE(book.find(3) != nullptr);   // stop-loss now rests
+
+  // Hitting the stop-loss cancels the take-profit (they are an OCO pair).
+  book.submit(Limit(5, Side::Buy, 95, 5));
+  REQUIRE(book.find(3) == nullptr);   // filled
+  REQUIRE(book.find(2) == nullptr);   // OCO sibling cancelled
+  REQUIRE(book.resting_count() == 0);
 }
 
 TEST_CASE("Cancel removes a resting order and updates the top",

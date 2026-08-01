@@ -269,6 +269,12 @@ Linux (CI/container) during hardening.
             Repricing moves the order (time-priority loss). NB: a peg that
             reprices to a marketable price rests there and matches on the next
             aggressor rather than auto-matching -- a documented simplification.
-      - [ ] OT4 remainder (reduce-only, discretionary), OT6 OCO/OTO/bracket,
-            OT7 auctions, OT8 storage determinism.
+      - [x] OT6 contingent orders: a group manager keyed on LinkSpec.group_id
+            reacts to fills. OCO cancels the sibling leg when one fills; OTO
+            holds a child out of the book and releases it when the parent
+            fully fills; a bracket is OTO + OCO -- the entry's fill releases
+            take-profit and stop-loss as a mutually-cancelling OCO pair.
+            Child release re-enters submit (trades cascade into the outcome).
+      - [ ] OT4 remainder (reduce-only, discretionary), OT7 auctions,
+            OT8 storage determinism.
 - [ ] H1-H2 Hardening (TLS + robustness)
