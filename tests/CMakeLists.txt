@@ -19,3 +19,8 @@ target_link_libraries(test_util PRIVATE codicis_util)
 codicis_add_test(test_config
   unit/test_config.cc)
 target_link_libraries(test_config PRIVATE codicis_config)
+
+codicis_add_test(test_event
+  unit/test_event.cc)
+target_link_libraries(test_event PRIVATE codicis_event)
+target_include_directories(test_event PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)

@@ -142,7 +142,12 @@ Linux (CI/container) during hardening.
       `key = value` file parser, CLI parser (`--k=v`, `--k v`, bare bool,
       `--config`), precedence defaults->file->CLI, type/range validation,
       unknown-key rejection. Typed getters. Catch2 suite green.
-- [ ] P2 Event loop (kqueue + epoll)
+- [x] P2 Event loop (kqueue + epoll): `EventLoop` abstraction with a
+      base-class timer min-heap and level-triggered `IoHandler`/`TimerHandler`
+      dispatch; native `KqueueLoop`; compile-guarded `EpollLoop` (Linux, not
+      yet compiled/validated here); `MakeEventLoop` factory; `FakeEventLoop`
+      test fixture. Deterministic timer tests (ManualClock) + real kqueue
+      pipe/socketpair I/O tests. Green.
 - [ ] P3 Net HTTP
 - [ ] P4 Net WebSocket
 - [ ] P5 IPC helper framework
