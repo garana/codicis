@@ -174,6 +174,88 @@ TEST_CASE("Market order sweeps and discards the remainder", "[core][match]") {
   REQUIRE(book.total_qty_at(Side::Sell, 101) == 3);
 }
 
+TEST_CASE("Self-trade prevention: cancel resting", "[core][stp]") {
+  OrderBook book(StpPolicy::kCancelResting);
+  Order maker = Limit(1, Side::Sell, 100, 5);
+  maker.client_id = 5;
+  book.submit(maker);
+  Order taker = Limit(2, Side::Buy, 100, 5);
+  taker.client_id = 5;
+  SubmitOutcome out = book.submit(taker);
+  REQUIRE(out.trades.empty());        // no self-trade
+  REQUIRE(book.find(1) == nullptr);   // resting maker cancelled
+  REQUIRE(out.rested);                // taker rests instead
+  Ticks bid = 0;
+  REQUIRE(book.best_bid(&bid));
+  REQUIRE(bid == 100);
+}
+
+TEST_CASE("Self-trade prevention: cancel aggressor", "[core][stp]") {
+  OrderBook book(StpPolicy::kCancelAggressor);
+  Order maker = Limit(1, Side::Sell, 100, 5);
+  maker.client_id = 5;
+  book.submit(maker);
+  Order taker = Limit(2, Side::Buy, 100, 5);
+  taker.client_id = 5;
+  SubmitOutcome out = book.submit(taker);
+  REQUIRE(out.trades.empty());
+  REQUIRE_FALSE(out.rested);          // aggressor remainder cancelled
+  REQUIRE(book.find(1) != nullptr);   // maker untouched
+  REQUIRE(book.resting_count() == 1);
+}
+
+TEST_CASE("Self-trade prevention does not affect other accounts",
+          "[core][stp]") {
+  OrderBook book(StpPolicy::kCancelResting);
+  Order maker = Limit(1, Side::Sell, 100, 5);
+  maker.client_id = 5;
+  book.submit(maker);
+  Order taker = Limit(2, Side::Buy, 100, 5);
+  taker.client_id = 9;  // different account
+  SubmitOutcome out = book.submit(taker);
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.filled == 5);
+}
+
+TEST_CASE("Min-quantity requires a floor to be available", "[core][flags]") {
+  SECTION("rejected when floor not available") {
+    OrderBook book;
+    book.submit(Limit(1, Side::Sell, 100, 5));
+    Order o = Limit(2, Side::Buy, 100, 20);
+    o.min_qty = 10;
+    SubmitOutcome out = book.submit(o);
+    REQUIRE_FALSE(out.accepted);
+    REQUIRE(book.total_qty_at(Side::Sell, 100) == 5);
+  }
+  SECTION("accepted with partials above the floor") {
+    OrderBook book;
+    book.submit(Limit(1, Side::Sell, 100, 5));
+    Order o = Limit(2, Side::Buy, 100, 20);
+    o.min_qty = 5;
+    SubmitOutcome out = book.submit(o);
+    REQUIRE(out.accepted);
+    REQUIRE(out.filled == 5);
+  }
+}
+
+TEST_CASE("Expiry cancels timed-out resting orders", "[core][tif]") {
+  OrderBook book;
+  Order a = Limit(1, Side::Buy, 99, 10);
+  a.expiry_ns = 1000;
+  book.submit(a);
+  Order b = Limit(2, Side::Buy, 98, 10);  // no expiry
+  book.submit(b);
+
+  std::vector<OrderId> expired = book.expire(500);
+  REQUIRE(expired.empty());  // not yet due
+
+  expired = book.expire(1000);
+  REQUIRE(expired.size() == 1);
+  REQUIRE(expired[0] == 1);
+  REQUIRE(book.find(1) == nullptr);
+  REQUIRE(book.find(2) != nullptr);
+}
+
 TEST_CASE("Cancel removes a resting order and updates the top",
           "[core][cancel]") {
   OrderBook book;

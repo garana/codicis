@@ -23,8 +23,14 @@ using Quantity = std::int64_t;
 /** @brief An engine-assigned, monotonically increasing order identifier. */
 using OrderId = std::uint64_t;
 
+/** @brief An account/client identifier, used for self-trade prevention. */
+using ClientId = std::uint64_t;
+
 /** @brief A monotonic arrival sequence number establishing time priority. */
 using SeqNo = std::uint64_t;
+
+/** @brief A wall-clock timestamp in nanoseconds (for expiry/reporting). */
+using Timestamp = std::int64_t;
 
 /** @brief The side of an order. */
 enum class Side : std::uint8_t {

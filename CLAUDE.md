@@ -186,8 +186,10 @@ Linux (CI/container) during hardening.
             O(1) lookup), FIFO levels, O(1) cancel, price-time matcher for
             Market/Limit (trade at maker price), with IOC discard, FOK/AON
             all-or-none pre-scan, and Post-Only reject-if-cross.
-      - [ ] OT2 remaining constraints (DAY/GTD expiry, Min-Qty, self-trade
-            prevention), OT3 stops/trailing, OT4 iceberg/hidden/discretionary,
-            OT5 pegged, OT6 OCO/OTO/bracket, OT7 auctions, OT8 storage
-            determinism.
+      - [x] OT2 constraints: self-trade prevention (kNone/CancelResting/
+            CancelAggressor/CancelBoth via client_id), Min-Quantity floor, and
+            GTD/DAY expiry (expiry_ns + OrderBook::expire(now) returning
+            cancelled ids for the app to sweep on a timer).
+      - [ ] OT3 stops/trailing, OT4 iceberg/hidden/discretionary, OT5 pegged,
+            OT6 OCO/OTO/bracket, OT7 auctions, OT8 storage determinism.
 - [ ] H1-H2 Hardening (TLS + robustness)

@@ -143,6 +143,7 @@ struct OrderBook::Impl {
   Ladder asks{Side::Sell};
   std::unordered_map<OrderId, Entry> orders;
   SeqNo next_seq = 1;
+  StpPolicy stp = StpPolicy::kNone;
 
   /** @return The ladder for side s. */
   Ladder& ladder(Side s) { return s == Side::Buy ? bids : asks; }
@@ -205,8 +206,10 @@ struct OrderBook::Impl {
    * @brief Match aggressor o against the opposite side, appending trades.
    * @param o      The aggressor (mutated: leaves/filled).
    * @param trades Output executions.
+   * @return True if self-trade prevention cancelled the aggressor remainder
+   *         (so it must not rest).
    */
-  void match(Order& o, std::vector<Trade>& trades) {
+  bool match(Order& o, std::vector<Trade>& trades) {
     Ladder& opp = ladder(Opposite(o.side));
     while (o.leaves > 0) {
       Ticks bp;
@@ -223,6 +226,28 @@ struct OrderBook::Impl {
       while (o.leaves > 0 && lvl != nullptr && !lvl->fifo.empty()) {
         const OrderId mid = lvl->fifo.front();
         Entry& me = orders.at(mid);
+
+        // Self-trade prevention: same non-zero account on both sides.
+        if (stp != StpPolicy::kNone && o.client_id != 0 &&
+            me.order.client_id == o.client_id) {
+          const bool cancel_resting = stp == StpPolicy::kCancelResting ||
+                                      stp == StpPolicy::kCancelBoth;
+          const bool cancel_aggressor = stp == StpPolicy::kCancelAggressor ||
+                                        stp == StpPolicy::kCancelBoth;
+          if (cancel_resting) {
+            lvl->total -= me.order.leaves;
+            lvl->fifo.pop_front();
+            orders.erase(mid);
+          }
+          if (cancel_aggressor) {
+            if (lvl->total == 0) {
+              opp.on_removed(bp);
+            }
+            return true;  // aggressor remainder cancelled; stop matching
+          }
+          continue;  // kCancelResting: maker gone, try the next maker
+        }
+
         const Quantity fill = std::min(o.leaves, me.order.leaves);
         trades.push_back(Trade{o.id, mid, o.side, bp, fill});
         o.leaves -= fill;
@@ -239,6 +264,7 @@ struct OrderBook::Impl {
         opp.on_removed(bp);
       }
     }
+    return false;
   }
 
   /**
@@ -257,6 +283,11 @@ struct OrderBook::Impl {
 };
 
 OrderBook::OrderBook() : impl_(std::make_unique<Impl>()) {}
+
+OrderBook::OrderBook(StpPolicy stp) : impl_(std::make_unique<Impl>()) {
+  impl_->stp = stp;
+}
+
 OrderBook::~OrderBook() = default;
 
 SubmitOutcome OrderBook::submit(Order order) {
@@ -298,10 +329,25 @@ SubmitOutcome OrderBook::submit(Order order) {
     }
   }
 
-  impl_->match(order, out.trades);
+  // Min-Quantity: require at least min_qty immediately available (partials
+  // above the floor are allowed, unlike AON).
+  if (order.min_qty > 0) {
+    if (order.min_qty > order.qty) {
+      out.accepted = false;
+      out.reject_reason = "min_qty exceeds qty";
+      return out;
+    }
+    if (impl_->available_fill(order) < order.min_qty) {
+      out.accepted = false;
+      out.reject_reason = "minimum quantity not available";
+      return out;
+    }
+  }
+
+  const bool aggressor_cancelled = impl_->match(order, out.trades);
   out.filled = order.filled;
 
-  if (order.leaves > 0) {
+  if (order.leaves > 0 && !aggressor_cancelled) {
     const bool discard =
         order.type == OrdType::Market || order.tif == Tif::IOC;
     if (!discard) {
@@ -345,6 +391,21 @@ Quantity OrderBook::total_qty_at(Side side, Ticks price) const {
   Ladder& l = impl_->ladder(side);
   Level* lvl = l.at(price);
   return lvl == nullptr ? 0 : lvl->total;
+}
+
+std::vector<OrderId> OrderBook::expire(Timestamp now) {
+  std::vector<OrderId> expired;
+  for (const auto& kv : impl_->orders) {
+    const Order& o = kv.second.order;
+    if (o.expiry_ns > 0 && o.expiry_ns <= now) {
+      expired.push_back(kv.first);
+    }
+  }
+  std::sort(expired.begin(), expired.end());
+  for (const OrderId id : expired) {
+    cancel(id);
+  }
+  return expired;
 }
 
 std::size_t OrderBook::resting_count() const { return impl_->orders.size(); }

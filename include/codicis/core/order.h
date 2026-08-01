@@ -104,6 +104,7 @@ struct LinkSpec {
  */
 struct Order {
   OrderId id = 0;
+  ClientId client_id = 0;   /**< 0 disables self-trade prevention. */
   Side side = Side::Buy;
   OrdType type = OrdType::Limit;
   Tif tif = Tif::GTC;
@@ -117,6 +118,7 @@ struct Order {
   Quantity min_qty = 0;     /**< Minimum executable quantity (0 = none). */
 
   SeqNo seq = 0;            /**< Arrival order -> time priority. */
+  Timestamp expiry_ns = 0;  /**< GTD/DAY expiry; 0 means no expiry. */
 
   std::optional<TriggerSpec> trigger;
   std::optional<PegSpec> peg;

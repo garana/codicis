@@ -50,11 +50,29 @@ struct SubmitOutcome {
 };
 
 /**
+ * @brief Self-trade prevention policy applied when an order would match its
+ *        own account (same non-zero client_id).
+ */
+enum class StpPolicy {
+  kNone,            /**< Disabled: same-account orders may trade. */
+  kCancelResting,   /**< Cancel the resting maker; do not trade; continue. */
+  kCancelAggressor, /**< Cancel the incoming remainder; stop matching. */
+  kCancelBoth,      /**< Cancel both the maker and the aggressor remainder. */
+};
+
+/**
  * @brief A continuous limit order book for one instrument.
  */
 class OrderBook {
  public:
   OrderBook();
+
+  /**
+   * @brief Construct with a self-trade prevention policy.
+   * @param stp The policy to apply on same-account crossings.
+   */
+  explicit OrderBook(StpPolicy stp);
+
   ~OrderBook();
 
   OrderBook(const OrderBook&) = delete;
@@ -108,6 +126,13 @@ class OrderBook {
    * @return The summed leaves quantity at that level.
    */
   Quantity total_qty_at(Side side, Ticks price) const;
+
+  /**
+   * @brief Cancel all resting orders whose expiry is at or before @p now.
+   * @param now The current timestamp (nanoseconds).
+   * @return The ids of the orders that were expired, in ascending id order.
+   */
+  std::vector<OrderId> expire(Timestamp now);
 
   /** @return The number of resting orders across both sides. */
   std::size_t resting_count() const;
