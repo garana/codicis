@@ -17,6 +17,7 @@
  */
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <queue>
 #include <unordered_map>
@@ -190,6 +191,18 @@ class EventLoop {
   /** @brief Request that @ref run return after the current iteration. */
   void stop() { running_ = false; }
 
+  /**
+   * @brief Run @p fn at the end of the current (or next) loop iteration.
+   *
+   * Used to perform work that is unsafe during dispatch, most importantly
+   * destroying an object (such as a connection) from within its own callback.
+   * Deferred callbacks run after I/O and timer dispatch, in FIFO order.
+   * @param fn The callback to run once.
+   */
+  void defer(std::function<void()> fn) {
+    deferred_.push_back(std::move(fn));
+  }
+
   /** @return The number of descriptors currently registered. */
   std::size_t fd_count() const { return registrations_.size(); }
 
@@ -277,9 +290,13 @@ class EventLoop {
    */
   int compute_timeout_ms(int max_wait_ms) const;
 
+  /** @brief Run and clear any callbacks queued via @ref defer. */
+  void run_deferred();
+
   Clock* clock_;
   bool running_ = false;
   std::unordered_map<int, Registration> registrations_;
+  std::vector<std::function<void()>> deferred_;
 
   std::priority_queue<TimerEntry, std::vector<TimerEntry>, TimerGreater>
       timers_;

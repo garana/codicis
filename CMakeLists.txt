@@ -40,6 +40,7 @@ include(Platform)
 add_subdirectory(src/util)
 add_subdirectory(src/config)
 add_subdirectory(src/event)
+add_subdirectory(src/net)
 
 # ---- Tests -----------------------------------------------------------------
 

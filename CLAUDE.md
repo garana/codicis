@@ -148,7 +148,13 @@ Linux (CI/container) during hardening.
       yet compiled/validated here); `MakeEventLoop` factory; `FakeEventLoop`
       test fixture. Deterministic timer tests (ManualClock) + real kqueue
       pipe/socketpair I/O tests. Green.
-- [ ] P3 Net HTTP
+- [x] P3 Net HTTP: hand-rolled incremental HTTP/1.1 parser (partial input,
+      Content-Length + chunked, pipelining, keep-alive resolution, size
+      limits), request/response types, exact-match router (404/405),
+      non-blocking `TcpListener`, and an event-loop-driven `HttpServer` with a
+      per-connection read/parse/route/write state machine and dispatch-safe
+      teardown (EventLoop gained `defer()`). Parser unit tests + real loopback
+      integration tests (GET/POST/404/405/keep-alive). Green.
 - [ ] P4 Net WebSocket
 - [ ] P5 IPC helper framework
 - [ ] P6 App wiring and core seam

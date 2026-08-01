@@ -131,7 +131,17 @@ Status EventLoop::run_once(int max_wait_ms) {
   const int timeout_ms = compute_timeout_ms(max_wait_ms);
   Status s = backend_poll(timeout_ms);
   fire_due_timers();
+  run_deferred();
   return s;
+}
+
+void EventLoop::run_deferred() {
+  // Swap out so callbacks that themselves call defer() run next iteration.
+  std::vector<std::function<void()>> batch;
+  batch.swap(deferred_);
+  for (auto& fn : batch) {
+    fn();
+  }
 }
 
 Status EventLoop::run() {
