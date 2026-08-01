@@ -119,6 +119,21 @@ The full master plan lives at
 - **Sparse-book fallback.** The dense ladder's memory is proportional to the
   in-window tick span; add a hash-index fallback for pathologically sparse
   instruments.
+- **Move Order's conditional axes out-of-line (owning pointer).** Measured on
+  arm64/libc++, the three inline `std::optional<TriggerSpec/PegSpec/LinkSpec>`
+  members are 104 of `Order`'s 192 bytes (54%) and are disengaged for every
+  plain limit order (they are stored inline, always reserved). Replace them
+  with a single owning pointer on `Order` to a `Conditional` struct that holds
+  the trigger/peg/link payloads together, allocated only for the rare
+  stop/peg/linked/bracket orders (a bracket needs trigger + link at once, so
+  they must co-live in one allocation, not a variant). This shrinks a plain
+  `Order` to ~96 bytes -- halving the hot-path cache footprint of the book and
+  the `orders` map -- while conditional orders pay one heap allocation + an
+  indirection off the hot limit path. Use an owning smart pointer (deep-copy on
+  Order copy so value semantics are preserved) rather than a separate side
+  table. Do this when OT3-OT6 start populating those payloads. Cheaper partial
+  win available first: reorder payload fields to group the 1-byte tags and cut
+  internal padding (e.g. `TriggerSpec` 40 -> 32 bytes).
 
 ## Build and test
 
