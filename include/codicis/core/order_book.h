@@ -121,12 +121,26 @@ class OrderBook {
   bool best_ask(Ticks* out) const;
 
   /**
-   * @brief Total resting quantity at a price on a side.
+   * @brief Total resting (matchable) quantity at a price on a side.
+   *
+   * Includes hidden orders and the full reserve of icebergs -- this is what
+   * the matcher can execute against.
    * @param side  The book side.
    * @param price The price level.
    * @return The summed leaves quantity at that level.
    */
   Quantity total_qty_at(Side side, Ticks price) const;
+
+  /**
+   * @brief Displayed quantity at a price on a side (the public book view).
+   *
+   * Excludes hidden orders entirely and counts only an iceberg's currently
+   * visible slice.
+   * @param side  The book side.
+   * @param price The price level.
+   * @return The summed displayed quantity at that level.
+   */
+  Quantity displayed_qty_at(Side side, Ticks price) const;
 
   /**
    * @brief Cancel all resting orders whose expiry is at or before @p now.

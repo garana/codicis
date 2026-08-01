@@ -13,11 +13,29 @@
 namespace codicis {
 namespace {
 
-/** @brief One price level: FIFO of resting order ids plus a running total. */
+/** @brief One price level: FIFO of resting order ids plus running totals. */
 struct Level {
-  Quantity total = 0;
+  Quantity total = 0;      /**< Matchable quantity (incl. hidden/reserve). */
+  Quantity displayed = 0;  /**< Publicly visible quantity. */
   std::list<OrderId> fifo;
 };
+
+/**
+ * @brief The displayed contribution of a resting order.
+ * @param flags  The order's flag bitset.
+ * @param leaves Remaining quantity.
+ * @param slice  Current iceberg visible slice (ignored unless iceberg).
+ * @return Quantity contributed to the public book view.
+ */
+Quantity DisplayedOf(std::uint32_t flags, Quantity leaves, Quantity slice) {
+  if (HasFlag(flags, OrderFlag::kHidden)) {
+    return 0;
+  }
+  if (HasFlag(flags, OrderFlag::kIceberg)) {
+    return slice;
+  }
+  return leaves;
+}
 
 /**
  * @brief A dense price ladder for one side, indexed by tick offset.
@@ -137,6 +155,7 @@ struct OrderBook::Impl {
   struct Entry {
     Order order;
     std::list<OrderId>::iterator pos;
+    Quantity slice = 0;  /**< Iceberg visible slice remaining (else unused). */
   };
 
   Ladder bids{Side::Buy};
@@ -251,7 +270,12 @@ struct OrderBook::Impl {
           continue;  // kCancelResting: maker gone, try the next maker
         }
 
-        const Quantity fill = std::min(o.leaves, me.order.leaves);
+        const bool iceberg = HasFlag(me.order.flags, OrderFlag::kIceberg);
+        const bool hidden = HasFlag(me.order.flags, OrderFlag::kHidden);
+        // An iceberg exposes only its current slice to a single fill; other
+        // orders expose their full remainder.
+        const Quantity avail = iceberg ? me.slice : me.order.leaves;
+        const Quantity fill = std::min(o.leaves, avail);
         trades.push_back(Trade{.taker_id = o.id,
                                .maker_id = mid,
                                .taker_side = o.side,
@@ -264,9 +288,23 @@ struct OrderBook::Impl {
         me.order.leaves -= fill;
         me.order.filled += fill;
         lvl->total -= fill;
+        if (!hidden) {
+          lvl->displayed -= fill;  // displayed tracks leaves (normal) / slice
+        }
+        if (iceberg) {
+          me.slice -= fill;
+        }
         if (me.order.leaves == 0) {
           lvl->fifo.pop_front();
           orders.erase(mid);
+        } else if (iceberg && me.slice == 0) {
+          // Slice exhausted: replenish from the reserve and re-queue at the
+          // back of the level, losing time priority (standard iceberg rule).
+          me.slice = std::min(me.order.display_qty, me.order.leaves);
+          lvl->displayed += me.slice;
+          lvl->fifo.pop_front();
+          lvl->fifo.push_back(mid);
+          me.pos = std::prev(lvl->fifo.end());
         }
       }
       if (lvl != nullptr && lvl->total == 0) {
@@ -285,9 +323,13 @@ struct OrderBook::Impl {
     Level& lvl = own.touch(o.price);
     lvl.fifo.push_back(o.id);
     auto it = std::prev(lvl.fifo.end());
+    const Quantity slice = HasFlag(o.flags, OrderFlag::kIceberg)
+                               ? std::min(o.display_qty, o.leaves)
+                               : 0;
     lvl.total += o.leaves;
+    lvl.displayed += DisplayedOf(o.flags, o.leaves, slice);
     own.on_added(o.price);
-    orders.emplace(o.id, Entry{.order = o, .pos = it});
+    orders.emplace(o.id, Entry{.order = o, .pos = it, .slice = slice});
   }
 
   /**
@@ -514,9 +556,11 @@ bool OrderBook::cancel(OrderId id) {
   const Side side = e.order.side;
   const Ticks price = e.order.price;
   const Quantity leaves = e.order.leaves;
+  const Quantity displayed = DisplayedOf(e.order.flags, leaves, e.slice);
   Ladder& own = impl_->ladder(side);
   if (Level* lvl = own.at(price); lvl != nullptr) {
     lvl->total -= leaves;
+    lvl->displayed -= displayed;
     lvl->fifo.erase(e.pos);
     if (lvl->total == 0) {
       own.on_removed(price);
@@ -538,6 +582,12 @@ Quantity OrderBook::total_qty_at(Side side, Ticks price) const {
   Ladder& l = impl_->ladder(side);
   Level* lvl = l.at(price);
   return lvl == nullptr ? 0 : lvl->total;
+}
+
+Quantity OrderBook::displayed_qty_at(Side side, Ticks price) const {
+  Ladder& l = impl_->ladder(side);
+  Level* lvl = l.at(price);
+  return lvl == nullptr ? 0 : lvl->displayed;
 }
 
 std::vector<OrderId> OrderBook::expire(Timestamp now) {

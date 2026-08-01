@@ -253,6 +253,14 @@ Linux (CI/container) during hardening.
             re-anchor on favorable moves. Cancel works while parked;
             `last_trade_price`/`pending_stop_count` accessors. (Trigger scan is
             O(pending); price-keyed stop maps are the later optimization.)
-      - [ ] OT4 iceberg/hidden/discretionary, OT5 pegged, OT6 OCO/OTO/bracket,
-            OT7 auctions, OT8 storage determinism.
+      - [x] OT4 iceberg + hidden: iceberg orders expose only a display slice
+            and match only that much per fill, then replenish from the reserve
+            and re-queue at the back of the level (time-priority loss); hidden
+            orders match on their full reserve but contribute 0 to the public
+            book. `displayed_qty_at` vs `total_qty_at` split the visible from
+            the matchable view. (Reduce-Only needs a position/risk layer and
+            Discretionary needs a hidden price band in matching -- both still
+            TODO within OT4.)
+      - [ ] OT4 remainder (reduce-only, discretionary), OT5 pegged,
+            OT6 OCO/OTO/bracket, OT7 auctions, OT8 storage determinism.
 - [ ] H1-H2 Hardening (TLS + robustness)

@@ -67,6 +67,22 @@ Order TrailingStop(OrderId id, Side side, Ticks trail, Quantity qty) {
   return o;
 }
 
+/** @brief Build an iceberg limit order with a visible slice. */
+Order Iceberg(OrderId id, Side side, Ticks price, Quantity qty,
+              Quantity display) {
+  Order o = Limit(id, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kIceberg);
+  o.display_qty = display;
+  return o;
+}
+
+/** @brief Build a fully hidden limit order. */
+Order HiddenLimit(OrderId id, Side side, Ticks price, Quantity qty) {
+  Order o = Limit(id, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kHidden);
+  return o;
+}
+
 /** @brief Force a trade at @p px so the book has a last price; leaves it empty. */
 void SeedLast(OrderBook& book, Ticks px, OrderId* next_id) {
   book.submit(Limit((*next_id)++, Side::Sell, px, 1));
@@ -384,6 +400,48 @@ TEST_CASE("A triggered stop can cascade into another", "[core][stop]") {
   REQUIRE(book.pending_stop_count() == 0);
   REQUIRE(HasTaker(out, s1));
   REQUIRE(HasTaker(out, s2));
+}
+
+TEST_CASE("Iceberg shows only its slice but matches its full reserve",
+          "[core][iceberg]") {
+  OrderBook book;
+  book.submit(Iceberg(1, Side::Buy, 100, 10, 3));
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 10);
+  REQUIRE(book.displayed_qty_at(Side::Buy, 100) == 3);
+}
+
+TEST_CASE("Iceberg replenishes and loses priority to the queue",
+          "[core][iceberg]") {
+  OrderBook book;
+  book.submit(Iceberg(1, Side::Buy, 100, 10, 3));  // slice 3, reserve 10
+  book.submit(Limit(2, Side::Buy, 100, 5));        // queued behind
+
+  // Sell 9: takes the iceberg's 3-slice, which then re-queues behind order 2,
+  // so the next fills go to order 2 before returning to the iceberg.
+  SubmitOutcome out = book.submit(Limit(3, Side::Sell, 100, 9));
+  REQUIRE(out.trades.size() == 3);
+  REQUIRE(out.trades[0].maker_id == 1);
+  REQUIRE(out.trades[0].qty == 3);
+  REQUIRE(out.trades[1].maker_id == 2);  // priority passed to the queued order
+  REQUIRE(out.trades[1].qty == 5);
+  REQUIRE(out.trades[2].maker_id == 1);  // iceberg's refreshed slice
+  REQUIRE(out.trades[2].qty == 1);
+
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 6);      // iceberg reserve left
+  REQUIRE(book.displayed_qty_at(Side::Buy, 100) == 2);  // its current slice
+}
+
+TEST_CASE("Hidden orders match but are not displayed", "[core][hidden]") {
+  OrderBook book;
+  book.submit(HiddenLimit(1, Side::Buy, 100, 10));
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 10);
+  REQUIRE(book.displayed_qty_at(Side::Buy, 100) == 0);
+
+  SubmitOutcome out = book.submit(Limit(2, Side::Sell, 100, 4));
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].qty == 4);
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 6);
+  REQUIRE(book.displayed_qty_at(Side::Buy, 100) == 0);
 }
 
 TEST_CASE("A parked stop can be cancelled before triggering", "[core][stop]") {
