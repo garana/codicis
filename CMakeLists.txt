@@ -41,6 +41,8 @@ add_subdirectory(src/util)
 add_subdirectory(src/config)
 add_subdirectory(src/event)
 add_subdirectory(src/net)
+add_subdirectory(src/ipc)
+add_subdirectory(tools/storage_helper)
 
 # ---- Tests -----------------------------------------------------------------
 

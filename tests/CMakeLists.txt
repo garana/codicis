@@ -36,3 +36,11 @@ target_link_libraries(test_http_server PRIVATE codicis_net)
 codicis_add_test(test_ws
   unit/test_ws.cc)
 target_link_libraries(test_ws PRIVATE codicis_net)
+
+codicis_add_test(test_ipc
+  unit/test_ipc.cc)
+target_link_libraries(test_ipc PRIVATE codicis_ipc)
+# Give the spawn test the path to the freshly built reference helper.
+add_dependencies(test_ipc codicis_storage_helper)
+target_compile_definitions(test_ipc PRIVATE
+  CODICIS_STORAGE_HELPER_PATH="$<TARGET_FILE:codicis_storage_helper>")

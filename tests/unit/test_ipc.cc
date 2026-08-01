@@ -1,0 +1,281 @@
+/**
+ * @file test_ipc.cc
+ * @brief Tests for helper codecs, the pipelined client, and StorageClient.
+ */
+
+#include "catch_amalgamated.hpp"
+
+#include "codicis/event/event_loop.h"
+#include "codicis/ipc/helper_client.h"
+#include "codicis/ipc/helper_codec.h"
+#include "codicis/ipc/helper_message.h"
+#include "codicis/ipc/storage_client.h"
+#include "codicis/util/buffer.h"
+#include "codicis/util/clock.h"
+
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <vector>
+
+using namespace codicis;
+
+namespace {
+
+/** @brief Emulates the helper end of a socketpair for tests. */
+struct TestHelper {
+  int fd;
+  const HelperCodec& codec;
+  Buffer in;
+
+  /** @brief Drain and decode all buffered requests. */
+  std::vector<HelperMessage> read_requests() {
+    for (;;) {
+      std::uint8_t buf[4096];
+      const ssize_t n = ::read(fd, buf, sizeof(buf));
+      if (n > 0) {
+        in.append(buf, static_cast<std::size_t>(n));
+      } else {
+        break;
+      }
+    }
+    std::vector<HelperMessage> out;
+    for (;;) {
+      HelperMessage m;
+      std::string err;
+      const HelperDecode d = codec.decode(in, &m, &err);
+      if (d != HelperDecode::kComplete) {
+        break;
+      }
+      out.push_back(std::move(m));
+    }
+    return out;
+  }
+
+  /** @brief Encode and write a response. */
+  void send_response(const HelperMessage& msg) {
+    std::string bytes;
+    codec.encode(msg, &bytes);
+    std::size_t off = 0;
+    while (off < bytes.size()) {
+      const ssize_t n = ::write(fd, bytes.data() + off, bytes.size() - off);
+      if (n > 0) {
+        off += static_cast<std::size_t>(n);
+      } else {
+        break;
+      }
+    }
+  }
+};
+
+/** @brief Make a non-blocking socketpair. */
+void MakePair(int sp[2]) {
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sp) == 0);
+  for (int i = 0; i < 2; ++i) {
+    const int fl = ::fcntl(sp[i], F_GETFL, 0);
+    ::fcntl(sp[i], F_SETFL, fl | O_NONBLOCK);
+  }
+}
+
+}  // namespace
+
+TEST_CASE("Codecs round-trip a message", "[ipc][codec]") {
+  HelperMessage msg;
+  msg.req_id = 42;
+  msg.type = "report_order";
+  msg.set("id", "1001");
+  msg.set("px", "-5");  // value with characters that must survive
+
+  auto check = [&](const HelperCodec& codec) {
+    std::string bytes;
+    codec.encode(msg, &bytes);
+    Buffer b;
+    b.append(bytes);
+    HelperMessage out;
+    std::string err;
+    REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kComplete);
+    REQUIRE(out.req_id == 42);
+    REQUIRE(out.type == "report_order");
+    REQUIRE(out.get("id") != nullptr);
+    REQUIRE(*out.get("id") == "1001");
+    REQUIRE(*out.get("px") == "-5");
+    REQUIRE(b.empty());
+  };
+  check(TextHelperCodec{});
+  check(BinaryHelperCodec{});
+}
+
+TEST_CASE("Codecs decode several pipelined messages", "[ipc][codec]") {
+  auto check = [&](const HelperCodec& codec) {
+    HelperMessage a;
+    a.req_id = 1;
+    a.type = "ping";
+    HelperMessage b;
+    b.req_id = 2;
+    b.type = "commit";
+    std::string bytes;
+    codec.encode(a, &bytes);
+    codec.encode(b, &bytes);
+
+    Buffer buf;
+    buf.append(bytes);
+    HelperMessage out;
+    std::string err;
+    REQUIRE(codec.decode(buf, &out, &err) == HelperDecode::kComplete);
+    REQUIRE(out.req_id == 1);
+    REQUIRE(codec.decode(buf, &out, &err) == HelperDecode::kComplete);
+    REQUIRE(out.req_id == 2);
+    REQUIRE(codec.decode(buf, &out, &err) == HelperDecode::kIncomplete);
+  };
+  check(TextHelperCodec{});
+  check(BinaryHelperCodec{});
+}
+
+TEST_CASE("Binary codec rejects a bad magic", "[ipc][codec]") {
+  BinaryHelperCodec codec;
+  Buffer b;
+  b.append(std::string("XXXXYYYY"));  // 8 bytes, wrong 4-byte magic
+  HelperMessage out;
+  std::string err;
+  REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
+}
+
+TEST_CASE("HelperClient correlates pipelined out-of-order responses",
+          "[ipc][client]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  TestHelper helper{sp[1], codec, {}};
+
+  std::string got_a;
+  std::string got_b;
+  client.send("q", {{"which", "a"}},
+              [&](bool ok, const HelperMessage& reply) {
+                if (ok) got_a = *reply.get("which");
+              });
+  client.send("q", {{"which", "b"}},
+              [&](bool ok, const HelperMessage& reply) {
+                if (ok) got_b = *reply.get("which");
+              });
+
+  // Helper sees both requests; reply in reverse order.
+  std::vector<HelperMessage> reqs = helper.read_requests();
+  REQUIRE(reqs.size() == 2);
+  for (auto it = reqs.rbegin(); it != reqs.rend(); ++it) {
+    HelperMessage resp;
+    resp.req_id = it->req_id;
+    resp.type = "r";
+    resp.set("which", *it->get("which"));
+    helper.send_response(resp);
+  }
+
+  for (int i = 0; i < 20 && (got_a.empty() || got_b.empty()); ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(got_a == "a");
+  REQUIRE(got_b == "b");
+  REQUIRE(client.pending_count() == 0);
+
+  ::close(sp[1]);
+}
+
+TEST_CASE("StorageClient tracks outbox and commit watermark",
+          "[ipc][storage]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  StorageClient storage(client);
+  TestHelper helper{sp[1], codec, {}};
+
+  std::uint64_t highest = 0;
+
+  bool order_ok = false;
+  storage.report_order({{"id", "1"}}, [&](bool ok) { order_ok = ok; });
+  REQUIRE(storage.processed_pending() == 1);
+
+  // Service the report.
+  for (const HelperMessage& req : helper.read_requests()) {
+    highest = std::max(highest, req.req_id);
+    HelperMessage resp;
+    resp.req_id = req.req_id;
+    resp.type = req.type;
+    resp.set("status", "ok");
+    helper.send_response(resp);
+  }
+  for (int i = 0; i < 20 && !order_ok; ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(order_ok);
+  REQUIRE(storage.processed_pending() == 1);  // acked, not yet committed
+
+  // Commit clears the outbox up to the watermark.
+  bool committed = false;
+  std::uint64_t watermark = 0;
+  storage.commit([&](bool ok, std::uint64_t w) {
+    committed = ok;
+    watermark = w;
+  });
+  for (const HelperMessage& req : helper.read_requests()) {
+    HelperMessage resp;
+    resp.req_id = req.req_id;
+    resp.type = "commit";
+    resp.set("committed", std::to_string(highest));
+    helper.send_response(resp);
+  }
+  for (int i = 0; i < 20 && !committed; ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(committed);
+  REQUIRE(watermark == 1);
+  REQUIRE(storage.processed_pending() == 0);
+
+  ::close(sp[1]);
+}
+
+#if defined(CODICIS_STORAGE_HELPER_PATH)
+TEST_CASE("StorageClient works against the spawned reference helper",
+          "[ipc][spawn]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  Result<std::unique_ptr<HelperClient>> cr =
+      SpawnHelper(loop, {CODICIS_STORAGE_HELPER_PATH}, codec);
+  REQUIRE(cr.ok());
+  StorageClient storage(*cr.value());
+
+  bool order_ok = false;
+  storage.report_order({{"id", "7"}, {"px", "100"}},
+                       [&](bool ok) { order_ok = ok; });
+  for (int i = 0; i < 200 && !order_ok; ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(order_ok);
+
+  bool committed = false;
+  storage.commit([&](bool ok, std::uint64_t) { committed = ok; });
+  for (int i = 0; i < 200 && !committed; ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(committed);
+  REQUIRE(storage.processed_pending() == 0);
+}
+#endif

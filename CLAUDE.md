@@ -161,7 +161,15 @@ Linux (CI/container) during hardening.
       upgrades over the HTTP parser, reassembles fragmented messages, and
       auto-handles ping/pong/close. Vector tests (accept key, RFC masked
       frame, SHA-1/Base64) + real loopback echo integration. Green.
-- [ ] P5 IPC helper framework
+- [x] P5 IPC helper framework: wire-agnostic `HelperMessage` with two
+      interchangeable codecs (text `key=value` + length-prefixed binary);
+      `HelperClient` (pipelined, out-of-order correlation) over injected fds
+      plus a `SpawnHelper` fork/exec spawner; `StorageClient` implementing the
+      storage schema (report_order/report_trade, processed-queue outbox,
+      commit watermark that drops committed entries, pull_levels); and a
+      reference `codicis_storage_helper` child binary. Codec/round-trip +
+      socketpair client + storage outbox tests + real spawned-helper
+      integration. Green.
 - [ ] P6 App wiring and core seam
 - [ ] OT0-OT8 Order types (matching engine)
 - [ ] H1-H2 Hardening (TLS + robustness)
