@@ -26,24 +26,26 @@ Then, for example:
 
 ```
 curl -s localhost:8080/health
-curl -s -X POST --data 'side=sell&type=limit&price=100&qty=10' \
+curl -s -X POST --data 'symbol=BTC&side=sell&type=limit&price=100&qty=10' \
     localhost:8080/orders
-curl -s localhost:8080/book
-curl -s -X POST --data 'side=buy&type=limit&price=105&qty=4' \
+curl -s 'localhost:8080/book?symbol=BTC'
+curl -s -X POST --data 'symbol=BTC&side=buy&type=limit&price=105&qty=4' \
     localhost:8080/orders   # crosses; trades at the maker price 100
-curl -s -X POST --data 'id=1' localhost:8080/orders/cancel
+curl -s -X POST --data 'symbol=BTC&id=1' localhost:8080/orders/cancel
 ```
+
+Every order/cancel carries a `symbol`; each instrument has its own order book.
 
 WebSocket clients connect to `net.ws_port` (default 8081), send the opening
 RFC 6455 handshake, then submit orders as text frames using the same
 form-encoded body; the JSON result is streamed back as a text frame. For
 example: `side=sell&type=limit&price=100&qty=10`.
 
-A client can also subscribe to the market-data stream by sending
-`action=subscribe`. It then receives a top-of-book + trades update whenever the
-book changes, e.g.
-`{"type":"md","bid":null,"bid_qty":0,"ask":100,"ask_qty":6,"trades":[{"price":100,"qty":4}]}`.
-Send `action=unsubscribe` to stop.
+A client can also subscribe to a symbol's market-data stream by sending
+`action=subscribe&symbol=BTC`. It then receives a top-of-book + trades update
+whenever that book changes, e.g.
+`{"type":"md","symbol":"BTC","bid":null,"bid_qty":0,"ask":100,"ask_qty":6,"trades":[{"price":100,"qty":4}]}`.
+Send `action=unsubscribe&symbol=BTC` to stop.
 
 Every option is also settable via a config file (see
 `config/codicis.example.conf`); CLI flags override file values.

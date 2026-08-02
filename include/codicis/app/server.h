@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "codicis/config/config.h"
+#include "codicis/core/matching_engine.h"
 #include "codicis/core/order_book.h"
 #include "codicis/engine/trading_engine.h"
 #include "codicis/event/event_loop.h"
@@ -75,15 +76,18 @@ class AppServer : public TimerHandler {
                          std::string_view payload);
 
   /**
-   * @brief Push a market-data update (top of book + trades) to subscribers.
+   * @brief Push a market-data update (top of book + trades) to a symbol's
+   *        subscribers.
+   * @param symbol The instrument whose book changed.
    * @param trades Trades that just occurred (may be empty for a book change).
    */
-  void broadcast_market_data(const std::vector<Trade>& trades);
+  void broadcast_market_data(const Symbol& symbol,
+                             const std::vector<Trade>& trades);
 
   EventLoop& loop_;
   const Config& config_;
 
-  OrderBook book_;
+  MatchingEngine matching_;
   HttpRouter router_;
   std::unique_ptr<HelperCodec> codec_;
   std::unique_ptr<HelperClient> helper_;
@@ -92,8 +96,9 @@ class AppServer : public TimerHandler {
   std::unique_ptr<HttpServer> http_;
   std::unique_ptr<WsServer> ws_;
 
-  // Market-data subscribers: connection id -> descriptor (for ws_->deliver).
-  std::unordered_map<std::uint64_t, int> md_subscribers_;
+  // Market-data subscribers per symbol: symbol -> (connection id -> fd).
+  std::unordered_map<Symbol, std::unordered_map<std::uint64_t, int>>
+      md_subscribers_;
 
   TimerId commit_timer_ = 0;
 };

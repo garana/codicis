@@ -103,6 +103,13 @@ class MatchingEngine {
    */
   std::vector<OrderId> expire(const Symbol& symbol, Timestamp now);
 
+  /**
+   * @brief Number of resting orders for a symbol.
+   * @param symbol The instrument.
+   * @return The resting order count (0 for an unknown symbol).
+   */
+  std::size_t resting_count(const Symbol& symbol) const;
+
   /** @return Whether a book exists for the symbol. */
   bool has_symbol(const Symbol& symbol) const {
     return books_.find(symbol) != books_.end();

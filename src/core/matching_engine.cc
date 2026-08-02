@@ -61,6 +61,11 @@ Quantity MatchingEngine::displayed_qty_at(const Symbol& symbol, Side side,
   return book == nullptr ? 0 : book->displayed_qty_at(side, price);
 }
 
+std::size_t MatchingEngine::resting_count(const Symbol& symbol) const {
+  const OrderBook* book = book_of(symbol);
+  return book == nullptr ? 0 : book->resting_count();
+}
+
 std::vector<OrderId> MatchingEngine::expire(const Symbol& symbol,
                                             Timestamp now) {
   const auto it = books_.find(symbol);

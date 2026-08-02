@@ -27,6 +27,7 @@
 #include <functional>
 #include <map>
 
+#include "codicis/core/matching_engine.h"
 #include "codicis/core/order.h"
 #include "codicis/core/order_book.h"
 #include "codicis/core/types.h"
@@ -35,7 +36,7 @@
 namespace codicis {
 
 /**
- * @brief Report-before-place coordinator around an OrderBook and StorageClient.
+ * @brief Report-before-place coordinator around a MatchingEngine + storage.
  */
 class TradingEngine {
  public:
@@ -50,25 +51,27 @@ class TradingEngine {
   using SubmitCallback = std::function<void(const Result&)>;
 
   /**
-   * @brief Construct over a book and a storage client (both must outlive it).
-   * @param book    The matching engine.
-   * @param storage The storage helper client.
+   * @brief Construct over a matching engine and storage client (both must
+   *        outlive it).
+   * @param matching The per-symbol matching engine.
+   * @param storage  The storage helper client.
    */
-  TradingEngine(OrderBook& book, StorageClient& storage)
-      : book_(book), storage_(storage) {}
+  TradingEngine(MatchingEngine& matching, StorageClient& storage)
+      : matching_(matching), storage_(storage) {}
 
   /**
-   * @brief Submit an order: report to storage, then place on acknowledgement.
+   * @brief Submit an order to a symbol: report to storage, then place on ack.
    *
    * If @p order.id is 0 the engine assigns one. The callback fires after the
    * order is placed in arrival order (or immediately-in-order if its ack is
    * the next expected), with the matching outcome; or with storage_ok=false if
    * the pre-report failed, in which case the order is not placed.
-   * @param order The order to submit.
-   * @param cb    Completion callback (may be empty).
+   * @param symbol The instrument to submit to.
+   * @param order  The order to submit.
+   * @param cb     Completion callback (may be empty).
    * @return The order id assigned to (or carried by) the order.
    */
-  OrderId submit(Order order, SubmitCallback cb);
+  OrderId submit(Symbol symbol, Order order, SubmitCallback cb);
 
   /**
    * @brief Ask storage to commit; committed entries leave the processed queue.
@@ -90,6 +93,7 @@ class TradingEngine {
  private:
   /** @brief A reported-but-not-yet-placed order awaiting in-order placement. */
   struct Pending {
+    Symbol symbol;
     Order order;
     SubmitCallback cb;
     bool acked = false;
@@ -100,9 +104,10 @@ class TradingEngine {
   void drain();
 
   /** @brief Report an order's resulting trades and fills to storage. */
-  void report_results(const Order& taker, const SubmitOutcome& out);
+  void report_results(const Symbol& symbol, const Order& taker,
+                      const SubmitOutcome& out);
 
-  OrderBook& book_;
+  MatchingEngine& matching_;
   StorageClient& storage_;
   std::map<SeqNo, Pending> pending_;  // ordered by arrival seq
   SeqNo next_assign_seq_ = 1;

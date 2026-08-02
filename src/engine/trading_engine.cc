@@ -19,8 +19,9 @@ const char* SideName(Side s) { return s == Side::Buy ? "buy" : "sell"; }
 
 /** @brief Build the persisted fields for a new order. */
 std::vector<std::pair<std::string, std::string>> OrderFields(
-    const Order& o) {
-  return {{"id", std::to_string(o.id)},
+    const Symbol& symbol, const Order& o) {
+  return {{"symbol", symbol},
+          {"id", std::to_string(o.id)},
           {"side", SideName(o.side)},
           {"price", std::to_string(o.price)},
           {"qty", std::to_string(o.qty)}};
@@ -28,7 +29,7 @@ std::vector<std::pair<std::string, std::string>> OrderFields(
 
 }  // namespace
 
-OrderId TradingEngine::submit(Order order, SubmitCallback cb) {
+OrderId TradingEngine::submit(Symbol symbol, Order order, SubmitCallback cb) {
   if (order.id == 0) {
     order.id = next_order_id_++;
   }
@@ -36,12 +37,13 @@ OrderId TradingEngine::submit(Order order, SubmitCallback cb) {
   const SeqNo seq = next_assign_seq_++;
 
   Pending p;
+  p.symbol = symbol;
   p.order = order;
   p.cb = std::move(cb);
   pending_.emplace(seq, std::move(p));
 
   // Report-before-place: only place once storage has acknowledged.
-  storage_.report_order(OrderFields(order), [this, seq](bool ok) {
+  storage_.report_order(OrderFields(symbol, order), [this, seq](bool ok) {
     const auto it = pending_.find(seq);
     if (it == pending_.end()) {
       return;
@@ -69,8 +71,8 @@ void TradingEngine::drain() {
     r.order_id = p.order.id;
     r.storage_ok = p.ok;
     if (p.ok) {
-      r.outcome = book_.submit(p.order);
-      report_results(p.order, r.outcome);
+      r.outcome = matching_.submit(p.symbol, p.order);
+      report_results(p.symbol, p.order, r.outcome);
     }
     if (p.cb) {
       p.cb(r);
@@ -78,7 +80,7 @@ void TradingEngine::drain() {
   }
 }
 
-void TradingEngine::report_results(const Order& taker,
+void TradingEngine::report_results(const Symbol& symbol, const Order& taker,
                                    const SubmitOutcome& out) {
   // A trade/fill report failing means the book mutated but storage did not
   // record it. Surface it (count + log); compensation/rollback is deferred.
@@ -91,7 +93,8 @@ void TradingEngine::report_results(const Order& taker,
 
   // Every execution is reported as a trade carrying both order ids.
   for (const Trade& t : out.trades) {
-    storage_.report_trade({{"taker", std::to_string(t.taker_id)},
+    storage_.report_trade({{"symbol", symbol},
+                           {"taker", std::to_string(t.taker_id)},
                            {"maker", std::to_string(t.maker_id)},
                            {"price", std::to_string(t.price)},
                            {"qty", std::to_string(t.qty)}},
@@ -103,7 +106,8 @@ void TradingEngine::report_results(const Order& taker,
   // (absent => fully filled and removed).
   auto report_fill = [&](OrderId id, Quantity qty, Quantity remaining,
                          bool complete) {
-    storage_.report_fill({{"id", std::to_string(id)},
+    storage_.report_fill({{"symbol", symbol},
+                          {"id", std::to_string(id)},
                           {"qty", std::to_string(qty)},
                           {"remaining", std::to_string(remaining)},
                           {"status", complete ? "filled" : "partial"}},
@@ -120,7 +124,7 @@ void TradingEngine::report_results(const Order& taker,
     maker_filled[t.maker_id] += t.qty;
   }
   for (const auto& [mid, qty] : maker_filled) {
-    const Order* m = book_.find(mid);
+    const Order* m = matching_.find(symbol, mid);
     const Quantity remaining = m != nullptr ? m->leaves : 0;
     report_fill(mid, qty, remaining, m == nullptr);
   }

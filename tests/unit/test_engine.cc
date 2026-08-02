@@ -108,16 +108,16 @@ TEST_CASE("Report-before-place keeps arrival order despite out-of-order acks",
   MakePair(sp);
   HelperClient client(loop, sp[0], sp[0], codec);
   StorageClient storage(client);
-  OrderBook book;
-  TradingEngine engine(book, storage);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
   TestHelper helper{sp[1], codec, {}};
 
   std::string order;  // records the order in which placements complete
-  const OrderId a = engine.submit(Limit(Side::Buy, 100, 5),
+  const OrderId a = engine.submit("BTC", Limit(Side::Buy, 100, 5),
                                   [&](const TradingEngine::Result& r) {
                                     if (r.storage_ok) order.push_back('A');
                                   });
-  const OrderId b = engine.submit(Limit(Side::Buy, 99, 5),
+  const OrderId b = engine.submit("BTC", Limit(Side::Buy, 99, 5),
                                   [&](const TradingEngine::Result& r) {
                                     if (r.storage_ok) order.push_back('B');
                                   });
@@ -140,7 +140,7 @@ TEST_CASE("Report-before-place keeps arrival order despite out-of-order acks",
     loop.run_once(5);
   }
   REQUIRE(order == "AB");  // placed in arrival order, not ack order
-  REQUIRE(book.resting_count() == 2);
+  REQUIRE(matching.resting_count("BTC") == 2);
 
   ::close(sp[1]);
 }
@@ -156,8 +156,8 @@ TEST_CASE("Trades and fills are reported to storage", "[engine]") {
   MakePair(sp);
   HelperClient client(loop, sp[0], sp[0], codec);
   StorageClient storage(client);
-  OrderBook book;
-  TradingEngine engine(book, storage);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
   TestHelper helper{sp[1], codec, {}};
 
   auto ack_pending_orders = [&]() {
@@ -171,9 +171,9 @@ TEST_CASE("Trades and fills are reported to storage", "[engine]") {
     }
   };
 
-  engine.submit(Limit(Side::Sell, 100, 5), nullptr);  // resting maker
+  engine.submit("BTC", Limit(Side::Sell, 100, 5), nullptr);  // resting maker
   ack_pending_orders();
-  engine.submit(Limit(Side::Buy, 100, 5), nullptr);   // crosses -> trade
+  engine.submit("BTC", Limit(Side::Buy, 100, 5), nullptr);   // crosses -> trade
   ack_pending_orders();
 
   // Collect everything the helper received and check the reporting.
@@ -209,12 +209,12 @@ TEST_CASE("A failed pre-report does not place the order", "[engine]") {
   MakePair(sp);
   HelperClient client(loop, sp[0], sp[0], codec);
   StorageClient storage(client);
-  OrderBook book;
-  TradingEngine engine(book, storage);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
 
   bool called = false;
   bool ok = true;
-  engine.submit(Limit(Side::Buy, 100, 5),
+  engine.submit("BTC", Limit(Side::Buy, 100, 5),
                 [&](const TradingEngine::Result& r) {
                   called = true;
                   ok = r.storage_ok;
@@ -226,7 +226,7 @@ TEST_CASE("A failed pre-report does not place the order", "[engine]") {
   }
   REQUIRE(called);
   REQUIRE_FALSE(ok);
-  REQUIRE(book.resting_count() == 0);  // never placed
+  REQUIRE(matching.resting_count("BTC") == 0);  // never placed
 }
 
 TEST_CASE("Trade and fill report failures are surfaced by the engine",
@@ -241,8 +241,8 @@ TEST_CASE("Trade and fill report failures are surfaced by the engine",
   MakePair(sp);
   HelperClient client(loop, sp[0], sp[0], codec, /*timeout=*/30'000'000);
   StorageClient storage(client);
-  OrderBook book;
-  TradingEngine engine(book, storage);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
   TestHelper helper{sp[1], codec, {}};
 
   // Ack only report_order messages so orders place, but never ack the
@@ -258,9 +258,9 @@ TEST_CASE("Trade and fill report failures are surfaced by the engine",
     }
   };
 
-  engine.submit(Limit(Side::Sell, 100, 5), nullptr);  // resting maker
+  engine.submit("BTC", Limit(Side::Sell, 100, 5), nullptr);  // resting maker
   ack_orders();
-  engine.submit(Limit(Side::Buy, 100, 5), nullptr);   // crosses -> 1 trade
+  engine.submit("BTC", Limit(Side::Buy, 100, 5), nullptr);   // crosses -> 1 trade
   ack_orders();
 
   // The trade and the two fills (taker + maker) were reported but never

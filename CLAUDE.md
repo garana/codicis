@@ -390,10 +390,16 @@ Linux (CI/container) during hardening.
             cancel (same id in two symbols), and empty-not-error unknown-symbol
             queries. NOT yet wired into TradingEngine/AppServer (next step:
             symbol in the request + per-symbol routing/MD).
-      - [ ] Wire MatchingEngine into TradingEngine + AppServer (symbol field on
-            requests, per-symbol /book and market-data), external UUIDs, a
-            sequence-numbered book-event stream, then the feed-helper building
-            L1/L2/L3. Build in that order.
+      - [x] Wire MatchingEngine into TradingEngine + AppServer. TradingEngine
+            now takes a MatchingEngine and `submit(symbol, order, cb)`, routing
+            placement to the symbol's book and tagging every storage report
+            (order/trade/fill) with the symbol. AppServer holds a
+            MatchingEngine; every order/cancel requires a `symbol` field,
+            `GET /book?symbol=` is per-symbol, and market-data subscriptions are
+            per-symbol (`action=subscribe&symbol=`) with per-symbol broadcast.
+            Tests updated; verified live with independent BTC/ETH books.
+      - [ ] External UUIDs (uuid<->id map), a sequence-numbered book-event
+            stream, then the feed-helper building L1/L2/L3. Build in that order.
 - [ ] H2 Hardening (robustness): parser fuzzing, bounded outbox + backpressure,
       Linux/epoll validation, load tests. (H1 TLS is dropped -- TLS is
       offloaded to an edge proxy; see To Design.)

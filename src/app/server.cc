@@ -144,14 +144,19 @@ void JsonError(HttpResponse& resp, int status, const std::string& message) {
  * @return True on success.
  */
 bool ParseOrderForm(
-    const std::vector<std::pair<std::string, std::string>>& form, Order* out,
-    std::string* err) {
+    const std::vector<std::pair<std::string, std::string>>& form,
+    Symbol* symbol, Order* out, std::string* err) {
+  const std::string* symbol_s = FormGet(form, "symbol");
   const std::string* side_s = FormGet(form, "side");
   const std::string* type_s = FormGet(form, "type");
   const std::string* qty_s = FormGet(form, "qty");
   Side side;
   OrdType type;
   std::int64_t qty = 0;
+  if (symbol_s == nullptr || symbol_s->empty()) {
+    *err = "missing symbol";
+    return false;
+  }
   if (side_s == nullptr || !ParseSide(*side_s, &side)) {
     *err = "missing or invalid side";
     return false;
@@ -187,6 +192,7 @@ bool ParseOrderForm(
       return false;
     }
   }
+  *symbol = *symbol_s;
   *out = order;
   return true;
 }
@@ -220,21 +226,22 @@ std::string ResultBody(const TradingEngine::Result& res) {
   return SubmitBody(res.outcome);
 }
 
-/** @brief Top-of-book JSON fields: "bid",... ,"ask",... (no braces). */
-std::string BookTopFields(const OrderBook& book) {
+/** @brief Top-of-book JSON fields for a symbol: "bid",... ,"ask",... . */
+std::string BookTopFields(const MatchingEngine& engine, const Symbol& symbol) {
   std::ostringstream f;
+  f << "\"symbol\":\"" << symbol << "\",";
   Ticks bid = 0;
   Ticks ask = 0;
-  if (book.best_bid(&bid)) {
+  if (engine.best_bid(symbol, &bid)) {
     f << "\"bid\":" << bid
-      << ",\"bid_qty\":" << book.total_qty_at(Side::Buy, bid);
+      << ",\"bid_qty\":" << engine.total_qty_at(symbol, Side::Buy, bid);
   } else {
     f << "\"bid\":null,\"bid_qty\":0";
   }
   f << ",";
-  if (book.best_ask(&ask)) {
+  if (engine.best_ask(symbol, &ask)) {
     f << "\"ask\":" << ask
-      << ",\"ask_qty\":" << book.total_qty_at(Side::Sell, ask);
+      << ",\"ask_qty\":" << engine.total_qty_at(symbol, Side::Sell, ask);
   } else {
     f << "\"ask\":null,\"ask_qty\":0";
   }
@@ -274,7 +281,7 @@ Status AppServer::start() {
   }
   helper_ = std::move(hr.value());
   storage_ = std::make_unique<StorageClient>(*helper_);
-  engine_ = std::make_unique<TradingEngine>(book_, *storage_);
+  engine_ = std::make_unique<TradingEngine>(matching_, *storage_);
 
   setup_routes();
   const std::string addr = config_.get_string("net.bind_address").value();
@@ -292,7 +299,11 @@ Status AppServer::start() {
       [this](WsConnection& conn, bool is_binary, std::string_view payload) {
         handle_ws_message(conn, is_binary, payload);
       },
-      [this](std::uint64_t id) { md_subscribers_.erase(id); });
+      [this](std::uint64_t id) {
+        for (auto& [symbol, subs] : md_subscribers_) {
+          subs.erase(id);
+        }
+      });
   const auto ws_port_cfg = static_cast<std::uint16_t>(
       config_.get_int("net.ws_port").value());
   if (Status s = ws_->listen(addr, ws_port_cfg); !s.ok()) {
@@ -344,9 +355,10 @@ void AppServer::setup_routes() {
 
 void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
   // Parse the request synchronously (the request is not valid after we return).
+  Symbol symbol;
   Order order;  // the engine assigns the id
   std::string err;
-  if (!ParseOrderForm(ParseForm(req.body), &order, &err)) {
+  if (!ParseOrderForm(ParseForm(req.body), &symbol, &order, &err)) {
     HttpResponse resp;
     JsonError(resp, 400, err);
     respond(std::move(resp));
@@ -355,37 +367,44 @@ void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
 
   // Report-before-place: the engine reports the order to storage first, and
   // reports the resulting trades and fills; we respond once it has placed.
-  engine_->submit(order, [this, respond](const TradingEngine::Result& res) {
-    HttpResponse resp;
-    resp.set_header("Content-Type", "application/json");
-    if (!res.storage_ok) {
-      resp.set_status(503);
-    } else if (!res.outcome.accepted) {
-      resp.set_status(409);
-    } else {
-      resp.set_status(200);
-    }
-    resp.body = ResultBody(res);
-    respond(std::move(resp));
-    if (res.storage_ok && res.outcome.accepted) {
-      broadcast_market_data(res.outcome.trades);
-    }
-  });
+  engine_->submit(
+      symbol, order,
+      [this, symbol, respond](const TradingEngine::Result& res) {
+        HttpResponse resp;
+        resp.set_header("Content-Type", "application/json");
+        if (!res.storage_ok) {
+          resp.set_status(503);
+        } else if (!res.outcome.accepted) {
+          resp.set_status(409);
+        } else {
+          resp.set_status(200);
+        }
+        resp.body = ResultBody(res);
+        respond(std::move(resp));
+        if (res.storage_ok && res.outcome.accepted) {
+          broadcast_market_data(symbol, res.outcome.trades);
+        }
+      });
 }
 
 void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
                                   std::string_view payload) {
   const auto form = ParseForm(payload);
 
-  // A market-data subscription request (rather than an order).
+  // A per-symbol market-data subscription request (rather than an order).
   if (const std::string* action = FormGet(form, "action")) {
+    const std::string* sym = FormGet(form, "symbol");
+    if (sym == nullptr || sym->empty()) {
+      conn.send_text(JsonErrorBody("missing symbol"));
+      return;
+    }
     if (*action == "subscribe") {
-      md_subscribers_[conn.id()] = conn.fd();
+      md_subscribers_[*sym][conn.id()] = conn.fd();
       conn.send_text("{\"subscribed\":true}");
       return;
     }
     if (*action == "unsubscribe") {
-      md_subscribers_.erase(conn.id());
+      md_subscribers_[*sym].erase(conn.id());
       conn.send_text("{\"subscribed\":false}");
       return;
     }
@@ -394,50 +413,64 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
   // Otherwise submit an order (same form-encoded body as REST). The engine
   // callback fires later; route the reply back through the server keyed by
   // (fd, id) so it is dropped safely if the connection is gone.
+  Symbol symbol;
   Order order;
   std::string err;
-  if (!ParseOrderForm(form, &order, &err)) {
+  if (!ParseOrderForm(form, &symbol, &order, &err)) {
     conn.send_text(JsonErrorBody(err));
     return;
   }
   const int fd = conn.fd();
   const std::uint64_t id = conn.id();
-  engine_->submit(order, [this, fd, id](const TradingEngine::Result& res) {
-    ws_->deliver_text(fd, id, ResultBody(res));
-    if (res.storage_ok && res.outcome.accepted) {
-      broadcast_market_data(res.outcome.trades);
-    }
-  });
+  engine_->submit(
+      symbol, order,
+      [this, symbol, fd, id](const TradingEngine::Result& res) {
+        ws_->deliver_text(fd, id, ResultBody(res));
+        if (res.storage_ok && res.outcome.accepted) {
+          broadcast_market_data(symbol, res.outcome.trades);
+        }
+      });
 }
 
 void AppServer::handle_cancel(const HttpRequest& req, HttpResponse& resp) {
   const auto form = ParseForm(req.body);
+  const std::string* sym = FormGet(form, "symbol");
   const std::string* id_s = FormGet(form, "id");
   std::int64_t id = 0;
+  if (sym == nullptr || sym->empty()) {
+    return JsonError(resp, 400, "missing symbol");
+  }
   if (id_s == nullptr || !ParseI64(*id_s, &id) || id <= 0) {
     return JsonError(resp, 400, "missing or invalid id");
   }
-  const bool ok = book_.cancel(static_cast<OrderId>(id));
+  const bool ok = matching_.cancel(*sym, static_cast<OrderId>(id));
   resp.set_status(ok ? 200 : 404);
   resp.set_header("Content-Type", "application/json");
   resp.body = std::string("{\"cancelled\":") + (ok ? "true" : "false") + "}";
   if (ok) {
-    broadcast_market_data({});  // the top of book may have changed
+    broadcast_market_data(*sym, {});  // the top of book may have changed
   }
 }
 
-void AppServer::handle_book(const HttpRequest& /*req*/, HttpResponse& resp) {
+void AppServer::handle_book(const HttpRequest& req, HttpResponse& resp) {
+  const auto q = ParseForm(req.query);  // e.g. /book?symbol=BTC
+  const std::string* sym = FormGet(q, "symbol");
+  if (sym == nullptr || sym->empty()) {
+    return JsonError(resp, 400, "missing symbol");
+  }
   resp.set_status(200);
   resp.set_header("Content-Type", "application/json");
-  resp.body = "{" + BookTopFields(book_) + "}";
+  resp.body = "{" + BookTopFields(matching_, *sym) + "}";
 }
 
-void AppServer::broadcast_market_data(const std::vector<Trade>& trades) {
-  if (md_subscribers_.empty()) {
+void AppServer::broadcast_market_data(const Symbol& symbol,
+                                      const std::vector<Trade>& trades) {
+  const auto it = md_subscribers_.find(symbol);
+  if (it == md_subscribers_.end() || it->second.empty()) {
     return;
   }
   std::ostringstream m;
-  m << "{\"type\":\"md\"," << BookTopFields(book_) << ",\"trades\":[";
+  m << "{\"type\":\"md\"," << BookTopFields(matching_, symbol) << ",\"trades\":[";
   for (std::size_t i = 0; i < trades.size(); ++i) {
     if (i != 0) {
       m << ",";
@@ -447,7 +480,7 @@ void AppServer::broadcast_market_data(const std::vector<Trade>& trades) {
   }
   m << "]}";
   const std::string msg = m.str();
-  for (const auto& [id, fd] : md_subscribers_) {
+  for (const auto& [id, fd] : it->second) {
     ws_->deliver_text(fd, id, msg);
   }
 }
