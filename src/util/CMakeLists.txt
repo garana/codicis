@@ -4,7 +4,8 @@ add_library(codicis_util STATIC
   logging.cc
   clock.cc
   base64.cc
-  sha1.cc)
+  sha1.cc
+  uuid.cc)
 
 target_include_directories(codicis_util PUBLIC
   ${CMAKE_SOURCE_DIR}/include)

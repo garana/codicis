@@ -29,15 +29,33 @@ std::vector<std::pair<std::string, std::string>> OrderFields(
 
 }  // namespace
 
-OrderId TradingEngine::submit(Symbol symbol, Order order, SubmitCallback cb) {
+ClientId TradingEngine::client_for(const std::string& owner) {
+  if (owner.empty()) {
+    return 0;  // anonymous: self-trade prevention disabled
+  }
+  const auto it = user_client_.find(owner);
+  if (it != user_client_.end()) {
+    return it->second;
+  }
+  const ClientId cid = next_client_id_++;
+  user_client_.emplace(owner, cid);
+  return cid;
+}
+
+std::string TradingEngine::submit(const Symbol& symbol,
+                                  const std::string& owner, Order order,
+                                  SubmitCallback cb) {
   if (order.id == 0) {
     order.id = next_order_id_++;
   }
-  const OrderId id = order.id;
+  order.client_id = client_for(owner);
+  const std::string order_uuid = uuids_.generate_string();
   const SeqNo seq = next_assign_seq_++;
 
   Pending p;
   p.symbol = symbol;
+  p.owner = owner;
+  p.order_uuid = order_uuid;
   p.order = order;
   p.cb = std::move(cb);
   pending_.emplace(seq, std::move(p));
@@ -52,7 +70,26 @@ OrderId TradingEngine::submit(Symbol symbol, Order order, SubmitCallback cb) {
     it->second.ok = ok;
     drain();
   });
-  return id;
+  return order_uuid;
+}
+
+CancelResult TradingEngine::cancel(const std::string& order_uuid,
+                                   const std::string& requester,
+                                   Symbol* symbol_out) {
+  const auto it = handles_.find(order_uuid);
+  if (it == handles_.end()) {
+    return CancelResult::kNotFound;
+  }
+  if (it->second.owner != requester) {
+    return CancelResult::kForbidden;  // only the owner may cancel
+  }
+  if (symbol_out != nullptr) {
+    *symbol_out = it->second.symbol;
+  }
+  matching_.cancel(it->second.symbol, it->second.id);
+  id_uuid_.erase(it->second.id);
+  handles_.erase(it);
+  return CancelResult::kOk;
 }
 
 void TradingEngine::drain() {
@@ -69,13 +106,37 @@ void TradingEngine::drain() {
 
     Result r;
     r.order_id = p.order.id;
+    r.order_uuid = p.order_uuid;
     r.storage_ok = p.ok;
     if (p.ok) {
       r.outcome = matching_.submit(p.symbol, p.order);
+      // Register the handle only if the order rests (a fully filled or
+      // discarded order has nothing to cancel later).
+      if (r.outcome.rested) {
+        handles_.emplace(
+            p.order_uuid,
+            Handle{.symbol = p.symbol, .id = p.order.id, .owner = p.owner});
+        id_uuid_.emplace(p.order.id, p.order_uuid);
+      }
       report_results(p.symbol, p.order, r.outcome);
+      prune_filled(p.symbol, r.outcome);
     }
     if (p.cb) {
       p.cb(r);
+    }
+  }
+}
+
+void TradingEngine::prune_filled(const Symbol& symbol,
+                                 const SubmitOutcome& out) {
+  // A resting maker that was fully filled is gone; drop its handle.
+  for (const Trade& t : out.trades) {
+    if (matching_.find(symbol, t.maker_id) == nullptr) {
+      const auto it = id_uuid_.find(t.maker_id);
+      if (it != id_uuid_.end()) {
+        handles_.erase(it->second);
+        id_uuid_.erase(it);
+      }
     }
   }
 }

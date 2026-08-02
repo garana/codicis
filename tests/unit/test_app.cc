@@ -116,8 +116,10 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
   SECTION("crossing orders trade") {
     // Resting sell.
     std::string r1 =
-        RoundTrip(loop, port, Post("/orders", "symbol=BTC&side=sell&type=limit&"
-                                              "price=100&qty=10"));
+        RoundTrip(loop, port,
+                  Post("/orders", "symbol=BTC&side=sell&type=limit&price=100&"
+                                  "qty=10&user=11111111-1111-4111-8111-"
+                                  "111111111111"));
     REQUIRE(r1.find("\"accepted\":true") != std::string::npos);
 
     // The book shows the resting ask.
@@ -126,10 +128,12 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
                   "GET /book?symbol=BTC HTTP/1.1\r\nConnection: close\r\n\r\n");
     REQUIRE(rb.find("\"ask\":100") != std::string::npos);
 
-    // Aggressive buy crosses and trades.
+    // Aggressive buy (a different owner) crosses and trades.
     std::string r2 =
-        RoundTrip(loop, port, Post("/orders", "symbol=BTC&side=buy&type=limit&"
-                                              "price=100&qty=10"));
+        RoundTrip(loop, port,
+                  Post("/orders", "symbol=BTC&side=buy&type=limit&price=100&"
+                                  "qty=10&user=22222222-2222-4222-8222-"
+                                  "222222222222"));
     REQUIRE(r2.find("\"filled\":10") != std::string::npos);
     REQUIRE(r2.find("\"maker\":1") != std::string::npos);
   }
@@ -235,12 +239,16 @@ TEST_CASE("WebSocket order submission matches end-to-end", "[app][ws]") {
   const int c = WsConnect(loop, wsport);
 
   // Two orders on one WebSocket connection: a resting sell, then a crossing buy.
-  const std::string r1 =
-      WsSubmit(loop, c, "symbol=BTC&side=sell&type=limit&price=100&qty=10");
+  const std::string r1 = WsSubmit(
+      loop, c,
+      "symbol=BTC&side=sell&type=limit&price=100&qty=10&user="
+      "11111111-1111-4111-8111-111111111111");
   REQUIRE(r1.find("\"accepted\":true") != std::string::npos);
 
-  const std::string r2 =
-      WsSubmit(loop, c, "symbol=BTC&side=buy&type=limit&price=100&qty=10");
+  const std::string r2 = WsSubmit(
+      loop, c,
+      "symbol=BTC&side=buy&type=limit&price=100&qty=10&user="
+      "22222222-2222-4222-8222-222222222222");
   REQUIRE(r2.find("\"filled\":10") != std::string::npos);
   REQUIRE(r2.find("\"maker\":1") != std::string::npos);
 
@@ -272,14 +280,18 @@ TEST_CASE("WebSocket subscribers receive market-data updates", "[app][ws][md]") 
   const int ord = WsConnect(loop, wsport);
 
   // A resting sell over the order connection publishes a book update.
-  WsSend(loop, ord, "symbol=BTC&side=sell&type=limit&price=100&qty=10");
+  WsSend(loop, ord,
+         "symbol=BTC&side=sell&type=limit&price=100&qty=10&user="
+         "11111111-1111-4111-8111-111111111111");
   REQUIRE(WsRecvFrame(loop, ord).find("\"accepted\":true") != std::string::npos);
   const std::string md1 = WsRecvFrame(loop, sub);
   REQUIRE(md1.find("\"type\":\"md\"") != std::string::npos);
   REQUIRE(md1.find("\"ask\":100") != std::string::npos);
 
-  // A crossing buy publishes the resulting trade in the market-data stream.
-  WsSend(loop, ord, "symbol=BTC&side=buy&type=limit&price=100&qty=4");
+  // A crossing buy (a different owner) publishes the resulting trade.
+  WsSend(loop, ord,
+         "symbol=BTC&side=buy&type=limit&price=100&qty=4&user="
+         "22222222-2222-4222-8222-222222222222");
   REQUIRE(WsRecvFrame(loop, ord).find("\"filled\":4") != std::string::npos);
   const std::string md2 = WsRecvFrame(loop, sub);
   REQUIRE(md2.find("\"trades\":[{\"price\":100,\"qty\":4}]") !=

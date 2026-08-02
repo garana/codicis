@@ -12,6 +12,7 @@
 #include "codicis/ipc/helper_codec.h"
 #include "codicis/ipc/storage_client.h"
 #include "codicis/util/clock.h"
+#include "codicis/util/uuid.h"
 
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -113,14 +114,14 @@ TEST_CASE("Report-before-place keeps arrival order despite out-of-order acks",
   TestHelper helper{sp[1], codec, {}};
 
   std::string order;  // records the order in which placements complete
-  const OrderId a = engine.submit("BTC", Limit(Side::Buy, 100, 5),
-                                  [&](const TradingEngine::Result& r) {
-                                    if (r.storage_ok) order.push_back('A');
-                                  });
-  const OrderId b = engine.submit("BTC", Limit(Side::Buy, 99, 5),
-                                  [&](const TradingEngine::Result& r) {
-                                    if (r.storage_ok) order.push_back('B');
-                                  });
+  const std::string a = engine.submit("BTC", "", Limit(Side::Buy, 100, 5),
+                                      [&](const TradingEngine::Result& r) {
+                                        if (r.storage_ok) order.push_back('A');
+                                      });
+  const std::string b = engine.submit("BTC", "", Limit(Side::Buy, 99, 5),
+                                      [&](const TradingEngine::Result& r) {
+                                        if (r.storage_ok) order.push_back('B');
+                                      });
   REQUIRE(a != b);
   REQUIRE(engine.pending_placements() == 2);
 
@@ -171,9 +172,9 @@ TEST_CASE("Trades and fills are reported to storage", "[engine]") {
     }
   };
 
-  engine.submit("BTC", Limit(Side::Sell, 100, 5), nullptr);  // resting maker
+  engine.submit("BTC", "", Limit(Side::Sell, 100, 5), nullptr);  // resting maker
   ack_pending_orders();
-  engine.submit("BTC", Limit(Side::Buy, 100, 5), nullptr);   // crosses -> trade
+  engine.submit("BTC", "", Limit(Side::Buy, 100, 5), nullptr);   // crosses -> trade
   ack_pending_orders();
 
   // Collect everything the helper received and check the reporting.
@@ -214,7 +215,7 @@ TEST_CASE("A failed pre-report does not place the order", "[engine]") {
 
   bool called = false;
   bool ok = true;
-  engine.submit("BTC", Limit(Side::Buy, 100, 5),
+  engine.submit("BTC", "", Limit(Side::Buy, 100, 5),
                 [&](const TradingEngine::Result& r) {
                   called = true;
                   ok = r.storage_ok;
@@ -258,9 +259,9 @@ TEST_CASE("Trade and fill report failures are surfaced by the engine",
     }
   };
 
-  engine.submit("BTC", Limit(Side::Sell, 100, 5), nullptr);  // resting maker
+  engine.submit("BTC", "", Limit(Side::Sell, 100, 5), nullptr);  // resting maker
   ack_orders();
-  engine.submit("BTC", Limit(Side::Buy, 100, 5), nullptr);   // crosses -> 1 trade
+  engine.submit("BTC", "", Limit(Side::Buy, 100, 5), nullptr);   // crosses -> 1 trade
   ack_orders();
 
   // The trade and the two fills (taker + maker) were reported but never
@@ -269,6 +270,57 @@ TEST_CASE("Trade and fill report failures are surfaced by the engine",
     loop.run_once(20);
   }
   REQUIRE(engine.report_failures() == 3);
+
+  ::close(sp[1]);
+}
+
+TEST_CASE("Owner may cancel by handle; a non-owner may not", "[engine][auth]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  StorageClient storage(client);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
+  TestHelper helper{.fd = sp[1], .codec = codec, .in = {}};
+
+  // Two distinct owners (valid v4 UUIDs).
+  const std::string alice = "11111111-1111-4111-8111-111111111111";
+  const std::string bob = "22222222-2222-4222-8222-222222222222";
+
+  // Alice rests a limit order; the engine returns its opaque UUID handle.
+  const std::string handle =
+      engine.submit("BTC", alice, Limit(Side::Buy, 100, 5), nullptr);
+  REQUIRE(IsValidUuidString(handle));
+  for (const HelperMessage& m : helper.read_requests()) {
+    if (m.type == "report_order") helper.ack(m.req_id, "report_order");
+  }
+  for (int i = 0; i < 20 && engine.pending_placements() > 0; ++i) {
+    loop.run_once(2);
+  }
+  REQUIRE(matching.resting_count("BTC") == 1);
+
+  // An unknown handle is not found.
+  REQUIRE(engine.cancel("33333333-3333-4333-8333-333333333333", alice) ==
+          CancelResult::kNotFound);
+
+  // Bob is not the owner: forbidden, and the order still rests.
+  REQUIRE(engine.cancel(handle, bob) == CancelResult::kForbidden);
+  REQUIRE(matching.resting_count("BTC") == 1);
+
+  // Alice owns it: the cancel succeeds and reports the symbol back.
+  Symbol symbol;
+  REQUIRE(engine.cancel(handle, alice, &symbol) == CancelResult::kOk);
+  REQUIRE(symbol == "BTC");
+  REQUIRE(matching.resting_count("BTC") == 0);
+
+  // The handle is gone after a successful cancel.
+  REQUIRE(engine.cancel(handle, alice) == CancelResult::kNotFound);
 
   ::close(sp[1]);
 }

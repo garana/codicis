@@ -11,6 +11,9 @@
 #include "codicis/util/logging.h"
 #include "codicis/util/result.h"
 #include "codicis/util/sha1.h"
+#include "codicis/util/uuid.h"
+
+#include <set>
 
 #include <cstring>
 #include <string>
@@ -100,6 +103,29 @@ TEST_CASE("SHA-1 matches RFC 3174 vectors", "[util][sha1]") {
   REQUIRE(Sha1Hex(Sha1(std::string(
               "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))) ==
           "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+}
+
+TEST_CASE("UUID v4 generation and validation", "[util][uuid]") {
+  UuidGenerator gen(12345);  // fixed seed for a deterministic test
+  const std::string a = gen.generate_string();
+  const std::string b = gen.generate_string();
+
+  REQUIRE(a.size() == 36);
+  REQUIRE(IsValidUuidString(a));
+  REQUIRE(a[14] == '4');   // version nibble
+  REQUIRE((a[19] == '8' || a[19] == '9' || a[19] == 'a' || a[19] == 'b'));
+  REQUIRE(a != b);         // distinct
+
+  REQUIRE_FALSE(IsValidUuidString("not-a-uuid"));
+  REQUIRE_FALSE(IsValidUuidString(""));
+  REQUIRE_FALSE(IsValidUuidString(std::string(36, 'z')));  // right length, bad
+
+  // A batch is unique.
+  std::set<std::string> seen;
+  for (int i = 0; i < 1000; ++i) {
+    seen.insert(gen.generate_string());
+  }
+  REQUIRE(seen.size() == 1000);
 }
 
 TEST_CASE("Log level parsing and thresholding", "[util][logging]") {

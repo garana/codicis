@@ -26,24 +26,41 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
+#include <unordered_map>
 
 #include "codicis/core/matching_engine.h"
 #include "codicis/core/order.h"
 #include "codicis/core/order_book.h"
 #include "codicis/core/types.h"
 #include "codicis/ipc/storage_client.h"
+#include "codicis/util/uuid.h"
 
 namespace codicis {
 
+/** @brief Outcome of an authorized cancel-by-handle. */
+enum class CancelResult {
+  kOk,         /**< The order was cancelled. */
+  kNotFound,   /**< No resting order with that handle. */
+  kForbidden,  /**< The requester is not the order's owner. */
+};
+
 /**
  * @brief Report-before-place coordinator around a MatchingEngine + storage.
+ *
+ * Assigns each order an external, opaque UUID handle (returned to the client),
+ * mapped internally to (symbol, integer id). Each order has an owner (a user
+ * UUID); a cancel is authorized only if the requester matches the owner. The
+ * owner also maps to an internal client id so self-trade prevention is keyed on
+ * the same account.
  */
 class TradingEngine {
  public:
   /** @brief The result delivered once an order has been sequenced. */
   struct Result {
     bool storage_ok = false;  /**< False if the pre-report failed (not placed). */
-    OrderId order_id = 0;     /**< The engine-assigned order id. */
+    OrderId order_id = 0;     /**< The internal order id. */
+    std::string order_uuid;   /**< The external order handle. */
     SubmitOutcome outcome;    /**< Matching result (valid when storage_ok). */
   };
 
@@ -60,18 +77,33 @@ class TradingEngine {
       : matching_(matching), storage_(storage) {}
 
   /**
-   * @brief Submit an order to a symbol: report to storage, then place on ack.
+   * @brief Submit an order to a symbol on behalf of an owner.
    *
-   * If @p order.id is 0 the engine assigns one. The callback fires after the
-   * order is placed in arrival order (or immediately-in-order if its ack is
-   * the next expected), with the matching outcome; or with storage_ok=false if
-   * the pre-report failed, in which case the order is not placed.
+   * The engine assigns an external UUID handle and an internal id, resolves the
+   * owner to a client id (for self-trade prevention), reports the order to
+   * storage, and only then places it (in arrival order). The callback receives
+   * the UUID handle and matching outcome, or storage_ok=false if the pre-report
+   * failed (in which case the order is not placed).
    * @param symbol The instrument to submit to.
-   * @param order  The order to submit.
+   * @param owner  The owning user's UUID (empty for anonymous).
+   * @param order  The order to submit (id assigned by the engine).
    * @param cb     Completion callback (may be empty).
-   * @return The order id assigned to (or carried by) the order.
+   * @return The external UUID handle assigned to the order.
    */
-  OrderId submit(Symbol symbol, Order order, SubmitCallback cb);
+  std::string submit(const Symbol& symbol, const std::string& owner,
+                     Order order, SubmitCallback cb);
+
+  /**
+   * @brief Cancel a resting order by its UUID handle, if the requester owns it.
+   * @param order_uuid  The external order handle.
+   * @param requester   The requesting user's UUID.
+   * @param symbol_out  If non-null and the result is kOk, receives the symbol
+   *                    whose book changed (for a market-data broadcast).
+   * @return kOk, kNotFound (unknown handle), or kForbidden (not the owner).
+   */
+  CancelResult cancel(const std::string& order_uuid,
+                      const std::string& requester,
+                      Symbol* symbol_out = nullptr);
 
   /**
    * @brief Ask storage to commit; committed entries leave the processed queue.
@@ -91,9 +123,18 @@ class TradingEngine {
   std::size_t report_failures() const { return report_failures_; }
 
  private:
+  /** @brief A resting order's handle: where it lives and who owns it. */
+  struct Handle {
+    Symbol symbol;
+    OrderId id;
+    std::string owner;
+  };
+
   /** @brief A reported-but-not-yet-placed order awaiting in-order placement. */
   struct Pending {
     Symbol symbol;
+    std::string owner;
+    std::string order_uuid;
     Order order;
     SubmitCallback cb;
     bool acked = false;
@@ -107,12 +148,25 @@ class TradingEngine {
   void report_results(const Symbol& symbol, const Order& taker,
                       const SubmitOutcome& out);
 
+  /** @brief Drop handles for makers removed by a match. */
+  void prune_filled(const Symbol& symbol, const SubmitOutcome& out);
+
+  /** @return The internal client id for an owner (0 for anonymous). */
+  ClientId client_for(const std::string& owner);
+
   MatchingEngine& matching_;
   StorageClient& storage_;
+  UuidGenerator uuids_;
   std::map<SeqNo, Pending> pending_;  // ordered by arrival seq
+
+  std::unordered_map<std::string, Handle> handles_;   // order uuid -> handle
+  std::unordered_map<OrderId, std::string> id_uuid_;  // internal id -> uuid
+  std::unordered_map<std::string, ClientId> user_client_;  // owner -> client id
+
   SeqNo next_assign_seq_ = 1;
   SeqNo next_place_seq_ = 1;
   OrderId next_order_id_ = 1;
+  ClientId next_client_id_ = 1;
   std::size_t report_failures_ = 0;
 };
 

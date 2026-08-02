@@ -67,7 +67,7 @@ class AppServer : public TimerHandler {
 
  private:
   void setup_routes();
-  void handle_submit(const HttpRequest& req, HttpResponder respond);
+  void handle_submit(const HttpRequest& req, const HttpResponder& respond);
   void handle_cancel(const HttpRequest& req, HttpResponse& resp);
   void handle_book(const HttpRequest& req, HttpResponse& resp);
 

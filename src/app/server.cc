@@ -13,6 +13,7 @@
 
 #include "codicis/core/order.h"
 #include "codicis/util/logging.h"
+#include "codicis/util/uuid.h"
 
 namespace codicis {
 namespace {
@@ -198,10 +199,10 @@ bool ParseOrderForm(
 }
 
 /** @brief JSON body describing a successful submit outcome. */
-std::string SubmitBody(const SubmitOutcome& out) {
+std::string SubmitBody(const std::string& order_uuid, const SubmitOutcome& out) {
   std::ostringstream body;
-  body << "{\"accepted\":true,\"order_id\":" << out.order_id
-       << ",\"filled\":" << out.filled
+  body << "{\"accepted\":true,\"order\":\"" << order_uuid
+       << "\",\"order_id\":" << out.order_id << ",\"filled\":" << out.filled
        << ",\"rested\":" << (out.rested ? "true" : "false") << ",\"trades\":[";
   for (std::size_t i = 0; i < out.trades.size(); ++i) {
     const Trade& t = out.trades[i];
@@ -223,7 +224,7 @@ std::string ResultBody(const TradingEngine::Result& res) {
   if (!res.outcome.accepted) {
     return JsonErrorBody(res.outcome.reject_reason);
   }
-  return SubmitBody(res.outcome);
+  return SubmitBody(res.order_uuid, res.outcome);
 }
 
 /** @brief Top-of-book JSON fields for a symbol: "bid",... ,"ask",... . */
@@ -341,8 +342,8 @@ void AppServer::setup_routes() {
     resp.body = "ok";
   });
   router_.add_async("POST", "/orders",
-                    [this](const HttpRequest& r, HttpResponder respond) {
-                      handle_submit(r, std::move(respond));
+                    [this](const HttpRequest& r, const HttpResponder& respond) {
+                      handle_submit(r, respond);
                     });
   router_.add("POST", "/orders/cancel",
               [this](const HttpRequest& r, HttpResponse& p) {
@@ -353,14 +354,23 @@ void AppServer::setup_routes() {
   });
 }
 
-void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
+void AppServer::handle_submit(const HttpRequest& req,
+                              const HttpResponder& respond) {
   // Parse the request synchronously (the request is not valid after we return).
+  const auto form = ParseForm(req.body);
   Symbol symbol;
   Order order;  // the engine assigns the id
   std::string err;
-  if (!ParseOrderForm(ParseForm(req.body), &symbol, &order, &err)) {
+  if (!ParseOrderForm(form, &symbol, &order, &err)) {
     HttpResponse resp;
     JsonError(resp, 400, err);
+    respond(std::move(resp));
+    return;
+  }
+  const std::string* user = FormGet(form, "user");
+  if (user == nullptr || !IsValidUuidString(*user)) {
+    HttpResponse resp;
+    JsonError(resp, 400, "missing or invalid user");
     respond(std::move(resp));
     return;
   }
@@ -368,7 +378,7 @@ void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
   // Report-before-place: the engine reports the order to storage first, and
   // reports the resulting trades and fills; we respond once it has placed.
   engine_->submit(
-      symbol, order,
+      symbol, *user, order,
       [this, symbol, respond](const TradingEngine::Result& res) {
         HttpResponse resp;
         resp.set_header("Content-Type", "application/json");
@@ -420,10 +430,15 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
     conn.send_text(JsonErrorBody(err));
     return;
   }
+  const std::string* user = FormGet(form, "user");
+  if (user == nullptr || !IsValidUuidString(*user)) {
+    conn.send_text(JsonErrorBody("missing or invalid user"));
+    return;
+  }
   const int fd = conn.fd();
   const std::uint64_t id = conn.id();
   engine_->submit(
-      symbol, order,
+      symbol, *user, order,
       [this, symbol, fd, id](const TradingEngine::Result& res) {
         ws_->deliver_text(fd, id, ResultBody(res));
         if (res.storage_ok && res.outcome.accepted) {
@@ -434,21 +449,30 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
 
 void AppServer::handle_cancel(const HttpRequest& req, HttpResponse& resp) {
   const auto form = ParseForm(req.body);
-  const std::string* sym = FormGet(form, "symbol");
-  const std::string* id_s = FormGet(form, "id");
-  std::int64_t id = 0;
-  if (sym == nullptr || sym->empty()) {
-    return JsonError(resp, 400, "missing symbol");
+  const std::string* order_uuid = FormGet(form, "order");
+  const std::string* user = FormGet(form, "user");
+  if (order_uuid == nullptr || !IsValidUuidString(*order_uuid)) {
+    return JsonError(resp, 400, "missing or invalid order");
   }
-  if (id_s == nullptr || !ParseI64(*id_s, &id) || id <= 0) {
-    return JsonError(resp, 400, "missing or invalid id");
+  if (user == nullptr || !IsValidUuidString(*user)) {
+    return JsonError(resp, 400, "missing or invalid user");
   }
-  const bool ok = matching_.cancel(*sym, static_cast<OrderId>(id));
-  resp.set_status(ok ? 200 : 404);
+  // Authorize by owner: the requesting user must own the resting order.
+  Symbol symbol;
+  const CancelResult result = engine_->cancel(*order_uuid, *user, &symbol);
   resp.set_header("Content-Type", "application/json");
-  resp.body = std::string("{\"cancelled\":") + (ok ? "true" : "false") + "}";
-  if (ok) {
-    broadcast_market_data(*sym, {});  // the top of book may have changed
+  switch (result) {
+    case CancelResult::kOk:
+      resp.set_status(200);
+      resp.body = "{\"cancelled\":true}";
+      broadcast_market_data(symbol, {});  // the top of book may have changed
+      break;
+    case CancelResult::kNotFound:
+      JsonError(resp, 404, "unknown order");
+      break;
+    case CancelResult::kForbidden:
+      JsonError(resp, 403, "not the order owner");
+      break;
   }
 }
 
