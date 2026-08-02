@@ -9,6 +9,8 @@
 #include <string>
 #include <utility>
 
+#include "codicis/util/logging.h"
+
 namespace codicis {
 namespace {
 
@@ -78,13 +80,22 @@ void TradingEngine::drain() {
 
 void TradingEngine::report_results(const Order& taker,
                                    const SubmitOutcome& out) {
+  // A trade/fill report failing means the book mutated but storage did not
+  // record it. Surface it (count + log); compensation/rollback is deferred.
+  auto on_report = [this](bool ok) {
+    if (!ok) {
+      ++report_failures_;
+      LogMessage(LogLevel::kError, "storage failed to record a trade/fill");
+    }
+  };
+
   // Every execution is reported as a trade carrying both order ids.
   for (const Trade& t : out.trades) {
     storage_.report_trade({{"taker", std::to_string(t.taker_id)},
                            {"maker", std::to_string(t.maker_id)},
                            {"price", std::to_string(t.price)},
                            {"qty", std::to_string(t.qty)}},
-                          nullptr);
+                          on_report);
   }
 
   // Report each affected order's fill (partial or complete). The taker's
@@ -96,7 +107,7 @@ void TradingEngine::report_results(const Order& taker,
                           {"qty", std::to_string(qty)},
                           {"remaining", std::to_string(remaining)},
                           {"status", complete ? "filled" : "partial"}},
-                         nullptr);
+                         on_report);
   };
 
   if (out.filled > 0) {

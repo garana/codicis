@@ -21,6 +21,8 @@ OptionRegistry BuildOptionRegistry() {
                  "Helper wire codec: 'text' or 'binary'");
   reg.add_int_range("storage.commit_interval_ms", 100, 1, 3'600'000,
                     "How often to ask the storage helper to commit");
+  reg.add_int_range("storage.request_timeout_ms", 5000, 0, 3'600'000,
+                    "Per-request storage helper timeout in ms (0 disables)");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
   return reg;

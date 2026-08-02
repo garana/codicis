@@ -109,11 +109,17 @@ The full master plan lives at
 ## To Design (deferred — revisit before/while building the relevant phase)
 
 - **Store-queue with rollback.** Order/trade execution keeps a "to store"
-  queue; an entry is removed only when the storage helper reports success. On a
-  storage error, a rollback mechanism must undo the corresponding in-memory
-  book mutation (and any dependent trades). The detailed design (compensation
-  vs. optimistic-with-undo-log, cascade of dependent fills, client
-  notification) is intentionally deferred.
+  queue; an entry is removed only when the storage helper reports success.
+  Partial handling exists today: report-before-place means a new order is not
+  placed unless its pre-report is acked (HelperClient now has per-request
+  timeouts and fails -- never drops -- requests on a dead/closed helper), and
+  post-placement trade/fill report failures are surfaced by the engine
+  (`report_failures()` counter + error log). Still deferred: the actual
+  *rollback* -- undoing the in-memory book mutation (and dependent fills) when
+  a trade/fill fails to persist -- plus a bounded outbox with client
+  backpressure (503) when it fills. Detailed design (compensation vs.
+  optimistic-with-undo-log, cascade of dependent fills, client notification)
+  intentionally deferred.
 - **Additional helper types.** Trade reporter, last-known-price reporter, etc.,
   added later on the same `Helper`/`HelperCodec` framework.
 - **Separate reader helper for pull-levels-on-demand.** Use a second

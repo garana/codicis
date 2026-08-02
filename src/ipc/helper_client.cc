@@ -6,13 +6,14 @@
 #include "codicis/ipc/helper_client.h"
 
 #include <fcntl.h>
-#include <signal.h>
+#include <csignal>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
 #include <utility>
+#include <vector>
 
 namespace codicis {
 namespace {
@@ -30,21 +31,30 @@ void MakeCloexecNonBlocking(int fd) {
 }  // namespace
 
 HelperClient::HelperClient(EventLoop& loop, int read_fd, int write_fd,
-                           const HelperCodec& codec)
+                           const HelperCodec& codec, Nanos request_timeout_ns)
     : loop_(loop),
       read_fd_(read_fd),
       write_fd_(write_fd),
       same_fd_(read_fd == write_fd),
-      codec_(codec) {
+      codec_(codec),
+      timeout_ns_(request_timeout_ns) {
   static bool sigpipe_ignored = false;
   if (!sigpipe_ignored) {
     ::signal(SIGPIPE, SIG_IGN);
     sigpipe_ignored = true;
   }
   loop_.add(read_fd_, IoInterest::kRead, this);
+  if (timeout_ns_ > 0) {
+    // Sweep at half the timeout so a stalled request fails within ~1.5x of it.
+    const Nanos interval = timeout_ns_ / 2 > 0 ? timeout_ns_ / 2 : timeout_ns_;
+    sweep_timer_ = loop_.add_timer(interval, /*repeat=*/true, this);
+  }
 }
 
 HelperClient::~HelperClient() {
+  if (sweep_timer_ != 0) {
+    loop_.cancel_timer(sweep_timer_);
+  }
   if (!closed_) {
     loop_.remove(read_fd_);
     if (write_registered_) {
@@ -67,6 +77,14 @@ std::uint64_t HelperClient::send(
     std::string type,
     std::vector<std::pair<std::string, std::string>> fields, ResponseFn cb) {
   const std::uint64_t id = next_req_id_++;
+  if (closed_) {
+    if (cb) {
+      const HelperMessage empty;
+      cb(false, empty);  // never silently drop a request on a dead helper
+    }
+    return id;
+  }
+
   HelperMessage msg;
   msg.req_id = id;
   msg.type = std::move(type);
@@ -76,7 +94,9 @@ std::uint64_t HelperClient::send(
   codec_.encode(msg, &bytes);
   out_.append(bytes);
   if (cb) {
-    pending_.emplace(id, std::move(cb));
+    const Nanos deadline =
+        timeout_ns_ > 0 ? loop_.clock()->now() + timeout_ns_ : 0;
+    pending_.emplace(id, Pending{.cb = std::move(cb), .deadline = deadline});
   }
   set_write_interest(true);
   on_writable();
@@ -136,7 +156,7 @@ void HelperClient::on_readable() {
     }
     const auto it = pending_.find(msg.req_id);
     if (it != pending_.end()) {
-      ResponseFn cb = std::move(it->second);
+      ResponseFn cb = std::move(it->second.cb);
       pending_.erase(it);
       cb(true, msg);
     }
@@ -195,19 +215,44 @@ void HelperClient::handle_close() {
     write_registered_ = false;
   }
   // Fail any in-flight requests.
-  std::unordered_map<std::uint64_t, ResponseFn> pending;
+  std::unordered_map<std::uint64_t, Pending> pending;
   pending.swap(pending_);
-  HelperMessage empty;
+  const HelperMessage empty;
   for (auto& kv : pending) {
-    if (kv.second) {
-      kv.second(false, empty);
+    if (kv.second.cb) {
+      kv.second.cb(false, empty);
+    }
+  }
+}
+
+void HelperClient::on_timer(TimerId /*id*/) {
+  if (timeout_ns_ <= 0 || pending_.empty()) {
+    return;
+  }
+  const Nanos now = loop_.clock()->now();
+  std::vector<std::uint64_t> expired;
+  for (const auto& kv : pending_) {
+    if (kv.second.deadline != 0 && kv.second.deadline <= now) {
+      expired.push_back(kv.first);
+    }
+  }
+  const HelperMessage empty;
+  for (const std::uint64_t id : expired) {
+    const auto it = pending_.find(id);
+    if (it == pending_.end()) {
+      continue;
+    }
+    ResponseFn cb = std::move(it->second.cb);
+    pending_.erase(it);
+    if (cb) {
+      cb(false, empty);  // timed out: fail the request
     }
   }
 }
 
 Result<std::unique_ptr<HelperClient>> SpawnHelper(
     EventLoop& loop, const std::vector<std::string>& argv,
-    const HelperCodec& codec) {
+    const HelperCodec& codec, Nanos request_timeout_ns) {
   if (argv.empty()) {
     return MakeError(ErrorCode::kInvalidArg, "SpawnHelper: empty argv");
   }
@@ -263,8 +308,8 @@ Result<std::unique_ptr<HelperClient>> SpawnHelper(
   MakeCloexecNonBlocking(write_fd);
   MakeCloexecNonBlocking(read_fd);
 
-  auto client =
-      std::make_unique<HelperClient>(loop, read_fd, write_fd, codec);
+  auto client = std::make_unique<HelperClient>(loop, read_fd, write_fd, codec,
+                                               request_timeout_ns);
   client->set_child_pid(pid);
   return client;
 }

@@ -279,3 +279,140 @@ TEST_CASE("StorageClient works against the spawned reference helper",
   REQUIRE(storage.processed_pending() == 0);
 }
 #endif
+
+TEST_CASE("HelperClient times out a request with no response", "[ipc][timeout]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec, /*timeout=*/30'000'000);  // 30ms
+
+  bool called = false;
+  bool ok = true;
+  client.send("ping", {}, [&](bool o, const HelperMessage&) {
+    called = true;
+    ok = o;
+  });
+  REQUIRE(client.pending_count() == 1);
+
+  // The helper end never responds; the request must time out and fail.
+  for (int i = 0; i < 50 && !called; ++i) {
+    loop.run_once(20);
+  }
+  REQUIRE(called);
+  REQUIRE_FALSE(ok);
+  REQUIRE(client.pending_count() == 0);
+
+  ::close(sp[1]);
+}
+
+TEST_CASE("HelperClient fails an in-flight request when the helper dies",
+          "[ipc][close]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+
+  bool called = false;
+  bool ok = true;
+  client.send("ping", {}, [&](bool o, const HelperMessage&) {
+    called = true;
+    ok = o;
+  });
+  REQUIRE(client.pending_count() == 1);
+
+  ::close(sp[1]);  // helper dies before responding
+  for (int i = 0; i < 20 && !called; ++i) {
+    loop.run_once(10);
+  }
+  REQUIRE(called);
+  REQUIRE_FALSE(ok);
+  REQUIRE(client.closed());
+}
+
+TEST_CASE("HelperClient fails, not drops, a request sent after close",
+          "[ipc][close]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+
+  ::close(sp[1]);
+  for (int i = 0; i < 20 && !client.closed(); ++i) {
+    loop.run_once(10);
+  }
+  REQUIRE(client.closed());
+
+  bool called = false;
+  bool ok = true;
+  client.send("ping", {}, [&](bool o, const HelperMessage&) {
+    called = true;
+    ok = o;
+  });
+  REQUIRE(called);        // invoked immediately
+  REQUIRE_FALSE(ok);
+}
+
+TEST_CASE("StorageClient commit fails and keeps the outbox when helper dies",
+          "[ipc][storage]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  StorageClient storage(client);
+  TestHelper helper{sp[1], codec, {}};
+
+  bool acked = false;
+  storage.report_order({{"id", "1"}}, [&](bool ok) { acked = ok; });
+  for (const HelperMessage& m : helper.read_requests()) {
+    helper.send_response([&] {
+      HelperMessage r;
+      r.req_id = m.req_id;
+      r.type = m.type;
+      r.set("status", "ok");
+      return r;
+    }());
+  }
+  for (int i = 0; i < 20 && !acked; ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(acked);
+  REQUIRE(storage.processed_pending() == 1);
+
+  ::close(sp[1]);  // helper dies
+  for (int i = 0; i < 20 && !client.closed(); ++i) {
+    loop.run_once(5);
+  }
+
+  bool committed = false;
+  bool cok = true;
+  storage.commit([&](bool ok, std::uint64_t) {
+    committed = true;
+    cok = ok;
+  });
+  for (int i = 0; i < 20 && !committed; ++i) {
+    loop.run_once(5);
+  }
+  REQUIRE(committed);
+  REQUIRE_FALSE(cok);
+  REQUIRE(storage.processed_pending() == 1);  // not dropped: commit unconfirmed
+}

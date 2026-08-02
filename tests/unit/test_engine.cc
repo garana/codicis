@@ -228,3 +228,47 @@ TEST_CASE("A failed pre-report does not place the order", "[engine]") {
   REQUIRE_FALSE(ok);
   REQUIRE(book.resting_count() == 0);  // never placed
 }
+
+TEST_CASE("Trade and fill report failures are surfaced by the engine",
+          "[engine]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec, /*timeout=*/30'000'000);
+  StorageClient storage(client);
+  OrderBook book;
+  TradingEngine engine(book, storage);
+  TestHelper helper{sp[1], codec, {}};
+
+  // Ack only report_order messages so orders place, but never ack the
+  // report_trade / report_fill that follow a match -- they must time out.
+  auto ack_orders = [&]() {
+    for (const HelperMessage& m : helper.read_requests()) {
+      if (m.type == "report_order") {
+        helper.ack(m.req_id, "report_order");
+      }
+    }
+    for (int i = 0; i < 10; ++i) {
+      loop.run_once(2);
+    }
+  };
+
+  engine.submit(Limit(Side::Sell, 100, 5), nullptr);  // resting maker
+  ack_orders();
+  engine.submit(Limit(Side::Buy, 100, 5), nullptr);   // crosses -> 1 trade
+  ack_orders();
+
+  // The trade and the two fills (taker + maker) were reported but never
+  // acknowledged; after the timeout the engine counts them as failures.
+  for (int i = 0; i < 60 && engine.report_failures() < 3; ++i) {
+    loop.run_once(20);
+  }
+  REQUIRE(engine.report_failures() == 3);
+
+  ::close(sp[1]);
+}

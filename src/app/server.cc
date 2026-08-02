@@ -155,8 +155,10 @@ Status AppServer::start() {
   if (argv.empty()) {
     return Status(MakeError(ErrorCode::kInvalidArg, "empty storage.helper_cmd"));
   }
+  const std::int64_t timeout_ms =
+      config_.get_int("storage.request_timeout_ms").value();
   Result<std::unique_ptr<HelperClient>> hr =
-      SpawnHelper(loop_, argv, *codec_);
+      SpawnHelper(loop_, argv, *codec_, timeout_ms * 1'000'000);
   if (!hr.ok()) {
     return hr.error();
   }

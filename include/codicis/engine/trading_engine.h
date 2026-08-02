@@ -78,6 +78,15 @@ class TradingEngine {
   /** @return The number of orders reported but not yet placed. */
   std::size_t pending_placements() const { return pending_.size(); }
 
+  /**
+   * @return The number of trade/fill reports that failed to persist.
+   *
+   * These are reported after placement, so a failure means the book mutated
+   * but storage did not record it. Currently surfaced (counted + logged) but
+   * not yet compensated -- rollback is a deferred design item (see CLAUDE.md).
+   */
+  std::size_t report_failures() const { return report_failures_; }
+
  private:
   /** @brief A reported-but-not-yet-placed order awaiting in-order placement. */
   struct Pending {
@@ -99,6 +108,7 @@ class TradingEngine {
   SeqNo next_assign_seq_ = 1;
   SeqNo next_place_seq_ = 1;
   OrderId next_order_id_ = 1;
+  std::size_t report_failures_ = 0;
 };
 
 }  // namespace codicis
