@@ -137,6 +137,44 @@ The full master plan lives at
   concurrent write to the same range (and mind read-your-writes if the backend
   is eventually consistent). Ties into the deferred top-of-book windowing that
   OT8's pull path needs.
+- **Market-data & scaling architecture (decided).** Four decisions on how the
+  feed and edge scale, keeping the matching process busy only with matching:
+  1. **TLS offloaded at the edge (replaces H1).** codicis does NOT implement
+     TLS in-process; an edge reverse proxy (HAProxy, or nginx/Envoy) terminates
+     TLS/WSS and forwards plaintext http/ws to codicis on localhost. The
+     `SecureTransport` seam is dropped. HAProxy notes: WebSocket works in HTTP
+     mode with a long `timeout tunnel`; use PROXY protocol (`send-proxy`) if
+     codicis needs the real client IP. Deployment component, not a build dep.
+  2. **One feed-helper builds L1, L2 and L3** from a single input: the order
+     lifecycle event stream (add/update/remove) plus the trade stream. It does
+     NOT re-run matching -- L3/MBO is essentially relaying the events; L1/L2
+     aggregate the same deltas into best-bid/ask and per-price sums (holding a
+     replica is unavoidable for depth, but it is a mechanical apply, not
+     inference). Prerequisite: codicis must emit EVERY book mutation (adds,
+     cancels, peg reprices, iceberg replenish, stop triggers, GTD/DAY expiry) as
+     a sequence-numbered event log, not just trades. Public trade prints stay
+     anonymous (price/qty/time/aggressor side, no order ids); a separate
+     drop-copy/private feed to an order's owner may carry its UUID. The feed
+     path is best-effort + non-blocking (the engine must never stall on a slow
+     feed consumer): consumers detect a seq gap and resync from a snapshot --
+     unlike the reliable, acked storage path. Transport: start with a pipe,
+     evolve to an SPMC shared-memory ring or UDP multicast.
+  3. **External UUIDs with a uuid<->id map.** Assign a random uuidv4 per order
+     at creation (v4, not v7 -- no ordering/rate leak). External events, feeds,
+     and the client-facing order handle use the UUID; internal matching stays on
+     the fast integer OrderId. Keep a uuid<->OrderId map. Open item: pruning the
+     map on order removal cleanly needs the book-event stream (fill/cancel
+     events) -- until then prune on cancel and accept growth on fills.
+  4. **Per-symbol book registry; Symbol stays OFF the Order class.** A matching
+     engine owns `unordered_map<Symbol, OrderBook>`; the inbound request (or a
+     symbol-scoped session) supplies the symbol and routes to the right book.
+     Do NOT use an ambient/AsyncContext for the symbol -- it is intrinsic order
+     routing data, the event loop doesn't know it until the payload is parsed,
+     and one connection can multiplex symbols; pass it explicitly. Keep it off
+     the hot `Order` struct (the book already knows its own symbol; cancel is
+     scoped by symbol), which also serves the lean-Order goal. Build order:
+     per-symbol registry -> UUIDs -> book-event stream -> feed-helper (move WS
+     serving out of the matcher).
 - **Sparse-book fallback.** The dense ladder's memory is proportional to the
   in-window tick span; add a hash-index fallback for pathologically sparse
   instruments.
@@ -344,4 +382,9 @@ Linux (CI/container) during hardening.
             windowing (level eviction) -- currently the book holds all levels
             in memory, so there are no non-resident levels to pull.
       - [ ] OT4 remainder (reduce-only, discretionary), OT7 auctions.
-- [ ] H1-H2 Hardening (TLS + robustness)
+- [ ] Multi-symbol + market-data architecture (decided; see To Design):
+      per-symbol book registry, external UUIDs, a sequence-numbered book-event
+      stream, and a single feed-helper building L1/L2/L3. Build in that order.
+- [ ] H2 Hardening (robustness): parser fuzzing, bounded outbox + backpressure,
+      Linux/epoll validation, load tests. (H1 TLS is dropped -- TLS is
+      offloaded to an edge proxy; see To Design.)
