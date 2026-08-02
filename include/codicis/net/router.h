@@ -19,10 +19,25 @@
 namespace codicis {
 
 /**
- * @brief A request handler: reads @p req and fills @p resp.
+ * @brief A synchronous request handler: reads @p req and fills @p resp.
  */
 using HttpHandler =
     std::function<void(const HttpRequest& req, HttpResponse& resp)>;
+
+/**
+ * @brief A completion used to deliver a response, possibly later.
+ * @param resp The response to send.
+ */
+using HttpResponder = std::function<void(HttpResponse resp)>;
+
+/**
+ * @brief An asynchronous handler: responds now or later via @p respond.
+ *
+ * The handler must extract everything it needs from @p req synchronously (the
+ * reference is not valid after it returns), then call @p respond exactly once.
+ */
+using HttpAsyncHandler =
+    std::function<void(const HttpRequest& req, HttpResponder respond)>;
 
 /** @brief Result of attempting to route a request. */
 enum class RouteResult {
@@ -32,12 +47,12 @@ enum class RouteResult {
 };
 
 /**
- * @brief An exact-match method+path router.
+ * @brief An exact-match method+path router supporting sync and async handlers.
  */
 class HttpRouter {
  public:
   /**
-   * @brief Register a handler for a method and path.
+   * @brief Register a synchronous handler for a method and path.
    * @param method  HTTP method (matched case-sensitively, e.g. "GET").
    * @param path    Exact request path (e.g. "/health").
    * @param handler The handler to invoke.
@@ -45,19 +60,32 @@ class HttpRouter {
   void add(std::string method, std::string path, HttpHandler handler);
 
   /**
-   * @brief Route @p req, invoking a handler into @p resp on a match.
-   * @param req  The parsed request.
-   * @param resp The response to populate on a match.
-   * @return Whether a handler ran, or why none did.
+   * @brief Register an asynchronous handler for a method and path.
+   * @param method  HTTP method.
+   * @param path    Exact request path.
+   * @param handler The async handler to invoke.
    */
-  RouteResult route(const HttpRequest& req, HttpResponse& resp) const;
+  void add_async(std::string method, std::string path,
+                 HttpAsyncHandler handler);
+
+  /**
+   * @brief Dispatch @p req, delivering the response through @p respond.
+   *
+   * Sync handlers (and the 404/405 fallbacks) call @p respond before returning;
+   * async handlers may call it later. @p respond is always invoked exactly
+   * once.
+   * @param req     The parsed request.
+   * @param respond The completion used to deliver the response.
+   */
+  void dispatch(const HttpRequest& req, HttpResponder respond) const;
 
  private:
-  /** @brief A registered route. */
+  /** @brief A registered route (exactly one handler is set). */
   struct Entry {
     std::string method;
     std::string path;
-    HttpHandler handler;
+    HttpHandler sync;
+    HttpAsyncHandler async;
   };
 
   std::vector<Entry> routes_;

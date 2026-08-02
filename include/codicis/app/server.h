@@ -21,6 +21,7 @@
 
 #include "codicis/config/config.h"
 #include "codicis/core/order_book.h"
+#include "codicis/engine/trading_engine.h"
 #include "codicis/event/event_loop.h"
 #include "codicis/ipc/helper_client.h"
 #include "codicis/ipc/helper_codec.h"
@@ -58,7 +59,7 @@ class AppServer : public TimerHandler {
 
  private:
   void setup_routes();
-  void handle_submit(const HttpRequest& req, HttpResponse& resp);
+  void handle_submit(const HttpRequest& req, HttpResponder respond);
   void handle_cancel(const HttpRequest& req, HttpResponse& resp);
   void handle_book(const HttpRequest& req, HttpResponse& resp);
 
@@ -70,9 +71,9 @@ class AppServer : public TimerHandler {
   std::unique_ptr<HelperCodec> codec_;
   std::unique_ptr<HelperClient> helper_;
   std::unique_ptr<StorageClient> storage_;
+  std::unique_ptr<TradingEngine> engine_;
   std::unique_ptr<HttpServer> http_;
 
-  OrderId next_order_id_ = 1;
   TimerId commit_timer_ = 0;
 };
 

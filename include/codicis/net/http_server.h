@@ -56,6 +56,20 @@ class HttpServer {
   /** @return The number of currently open connections. */
   std::size_t connection_count() const { return conns_.size(); }
 
+  /**
+   * @brief Deliver a (possibly deferred) response to a connection.
+   *
+   * Looks up the connection by @p fd and verifies @p id to guard against a
+   * descriptor being reused by a newer connection; drops the response if the
+   * original connection is gone. Called by the per-request responder.
+   * @param fd         The connection's descriptor.
+   * @param id         The connection's unique id.
+   * @param resp       The response to send.
+   * @param keep_alive Whether to keep the connection open afterwards.
+   */
+  void deliver_response(int fd, std::uint64_t id, HttpResponse resp,
+                        bool keep_alive);
+
  private:
   /** @brief Accept callback: wrap @p fd in a connection. */
   void on_accept(int fd);
@@ -67,6 +81,7 @@ class HttpServer {
   const HttpRouter& router_;
   std::unique_ptr<TcpListener> listener_;
   std::unordered_map<int, std::unique_ptr<HttpConnection>> conns_;
+  std::uint64_t next_conn_id_ = 1;
 };
 
 }  // namespace codicis

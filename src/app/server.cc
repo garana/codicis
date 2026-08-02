@@ -131,8 +131,6 @@ void JsonError(HttpResponse& resp, int status, const std::string& message) {
   resp.body = "{\"error\":\"" + message + "\"}";
 }
 
-const char* SideName(Side s) { return s == Side::Buy ? "buy" : "sell"; }
-
 }  // namespace
 
 AppServer::AppServer(EventLoop& loop, const Config& config)
@@ -164,6 +162,7 @@ Status AppServer::start() {
   }
   helper_ = std::move(hr.value());
   storage_ = std::make_unique<StorageClient>(*helper_);
+  engine_ = std::make_unique<TradingEngine>(book_, *storage_);
 
   setup_routes();
   http_ = std::make_unique<HttpServer>(loop_, router_);
@@ -191,7 +190,7 @@ std::uint16_t AppServer::http_port() const {
 
 void AppServer::on_timer(TimerId /*id*/) {
   if (storage_ && storage_->processed_pending() > 0) {
-    storage_->commit(nullptr);
+    engine_->commit();
   }
 }
 
@@ -201,10 +200,10 @@ void AppServer::setup_routes() {
     resp.set_header("Content-Type", "text/plain");
     resp.body = "ok";
   });
-  router_.add("POST", "/orders",
-              [this](const HttpRequest& r, HttpResponse& p) {
-                handle_submit(r, p);
-              });
+  router_.add_async("POST", "/orders",
+                    [this](const HttpRequest& r, HttpResponder respond) {
+                      handle_submit(r, std::move(respond));
+                    });
   router_.add("POST", "/orders/cancel",
               [this](const HttpRequest& r, HttpResponse& p) {
                 handle_cancel(r, p);
@@ -214,36 +213,39 @@ void AppServer::setup_routes() {
   });
 }
 
-void AppServer::handle_submit(const HttpRequest& req, HttpResponse& resp) {
+void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
+  // Parse the request synchronously (the request is not valid after we return).
   const auto form = ParseForm(req.body);
-
   const std::string* side_s = FormGet(form, "side");
   const std::string* type_s = FormGet(form, "type");
   const std::string* qty_s = FormGet(form, "qty");
   Side side;
   OrdType type;
   std::int64_t qty = 0;
+  auto reject = [&](const std::string& msg) {
+    HttpResponse resp;
+    JsonError(resp, 400, msg);
+    respond(std::move(resp));
+  };
   if (side_s == nullptr || !ParseSide(*side_s, &side)) {
-    return JsonError(resp, 400, "missing or invalid side");
+    return reject("missing or invalid side");
   }
   if (type_s == nullptr || !ParseType(*type_s, &type)) {
-    return JsonError(resp, 400, "missing or invalid type");
+    return reject("missing or invalid type");
   }
   if (qty_s == nullptr || !ParseI64(*qty_s, &qty) || qty <= 0) {
-    return JsonError(resp, 400, "missing or invalid qty");
+    return reject("missing or invalid qty");
   }
 
-  Order order;
-  order.id = next_order_id_++;
+  Order order;  // the engine assigns the id
   order.side = side;
   order.type = type;
   order.qty = qty;
-
   if (type == OrdType::Limit) {
     const std::string* price_s = FormGet(form, "price");
     std::int64_t price = 0;
     if (price_s == nullptr || !ParseI64(*price_s, &price) || price <= 0) {
-      return JsonError(resp, 400, "missing or invalid price");
+      return reject("missing or invalid price");
     }
     order.price = price;
     order.tif = Tif::GTC;
@@ -252,49 +254,44 @@ void AppServer::handle_submit(const HttpRequest& req, HttpResponse& resp) {
   }
   if (const std::string* tif_s = FormGet(form, "tif")) {
     if (!ParseTif(*tif_s, &order.tif)) {
-      return JsonError(resp, 400, "invalid tif");
+      return reject("invalid tif");
     }
   }
 
-  const SubmitOutcome out = book_.submit(order);
-  if (!out.accepted) {
-    return JsonError(resp, 409, out.reject_reason);
-  }
-
-  // Report the order and any resulting trades to storage (best-effort).
-  if (storage_) {
-    storage_->report_order(
-        {{"id", std::to_string(out.order_id)},
-         {"side", SideName(side)},
-         {"price", std::to_string(order.price)},
-         {"qty", std::to_string(order.qty)}},
-        nullptr);
-    for (const Trade& t : out.trades) {
-      storage_->report_trade({{"taker", std::to_string(t.taker_id)},
-                              {"maker", std::to_string(t.maker_id)},
-                              {"price", std::to_string(t.price)},
-                              {"qty", std::to_string(t.qty)}},
-                             nullptr);
-    }
-  }
-
-  std::ostringstream body;
-  body << "{\"accepted\":true,\"order_id\":" << out.order_id
-       << ",\"filled\":" << out.filled
-       << ",\"rested\":" << (out.rested ? "true" : "false")
-       << ",\"trades\":[";
-  for (std::size_t i = 0; i < out.trades.size(); ++i) {
-    const Trade& t = out.trades[i];
-    if (i != 0) {
-      body << ",";
-    }
-    body << "{\"price\":" << t.price << ",\"qty\":" << t.qty
-         << ",\"maker\":" << t.maker_id << "}";
-  }
-  body << "]}";
-  resp.set_status(200);
-  resp.set_header("Content-Type", "application/json");
-  resp.body = body.str();
+  // Report-before-place: the engine reports the order to storage first, and
+  // reports the resulting trades and fills; we respond once it has placed.
+  engine_->submit(std::move(order),
+                  [respond](const TradingEngine::Result& res) {
+                    HttpResponse resp;
+                    if (!res.storage_ok) {
+                      JsonError(resp, 503, "storage unavailable");
+                      respond(std::move(resp));
+                      return;
+                    }
+                    const SubmitOutcome& out = res.outcome;
+                    if (!out.accepted) {
+                      JsonError(resp, 409, out.reject_reason);
+                      respond(std::move(resp));
+                      return;
+                    }
+                    std::ostringstream body;
+                    body << "{\"accepted\":true,\"order_id\":" << out.order_id
+                         << ",\"filled\":" << out.filled << ",\"rested\":"
+                         << (out.rested ? "true" : "false") << ",\"trades\":[";
+                    for (std::size_t i = 0; i < out.trades.size(); ++i) {
+                      const Trade& t = out.trades[i];
+                      if (i != 0) {
+                        body << ",";
+                      }
+                      body << "{\"price\":" << t.price << ",\"qty\":" << t.qty
+                           << ",\"maker\":" << t.maker_id << "}";
+                    }
+                    body << "]}";
+                    resp.set_status(200);
+                    resp.set_header("Content-Type", "application/json");
+                    resp.body = body.str();
+                    respond(std::move(resp));
+                  });
 }
 
 void AppServer::handle_cancel(const HttpRequest& req, HttpResponse& resp) {
