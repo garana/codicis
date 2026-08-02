@@ -116,6 +116,21 @@ The full master plan lives at
   notification) is intentionally deferred.
 - **Additional helper types.** Trade reporter, last-known-price reporter, etc.,
   added later on the same `Helper`/`HelperCodec` framework.
+- **Separate reader helper for pull-levels-on-demand.** Use a second
+  `HelperClient` instance (same class/framework as the writer) for pulling
+  non-resident levels, distinct from the writer/committer connection.
+  Rationale: the level set being *read* (deep, non-resident levels) and the
+  set being *written* (top-of-book orders/trades/commits) are disjoint -- a
+  partition in set-theory terms -- so a read never depends on a pending write
+  and must not queue behind slow write acks/commits on the same pipe. Two
+  connections remove that head-of-line blocking; the writer keeps strict
+  report-before-place/commit ordering while pulls run in parallel. Caveat: the
+  partition is exact only away from the resident/non-resident boundary. When a
+  level migrates (a pull promotes deep -> resident, or eviction demotes
+  resident -> deep), the handoff must be serialized so a pull can't race a
+  concurrent write to the same range (and mind read-your-writes if the backend
+  is eventually consistent). Ties into the deferred top-of-book windowing that
+  OT8's pull path needs.
 - **Sparse-book fallback.** The dense ladder's memory is proportional to the
   in-window tick span; add a hash-index fallback for pathologically sparse
   instruments.
