@@ -28,6 +28,7 @@
 #include "codicis/ipc/storage_client.h"
 #include "codicis/net/http_server.h"
 #include "codicis/net/router.h"
+#include "codicis/net/websocket.h"
 #include "codicis/util/result.h"
 
 namespace codicis {
@@ -55,6 +56,9 @@ class AppServer : public TimerHandler {
   /** @return The bound HTTP port (valid after a successful @ref start). */
   std::uint16_t http_port() const;
 
+  /** @return The bound WebSocket port (valid after a successful @ref start). */
+  std::uint16_t ws_port() const;
+
   void on_timer(TimerId id) override;
 
  private:
@@ -62,6 +66,10 @@ class AppServer : public TimerHandler {
   void handle_submit(const HttpRequest& req, HttpResponder respond);
   void handle_cancel(const HttpRequest& req, HttpResponse& resp);
   void handle_book(const HttpRequest& req, HttpResponse& resp);
+
+  /** @brief Submit an order received over a WebSocket and stream the result. */
+  void handle_ws_message(WsConnection& conn, bool is_binary,
+                         std::string_view payload);
 
   EventLoop& loop_;
   const Config& config_;
@@ -73,6 +81,7 @@ class AppServer : public TimerHandler {
   std::unique_ptr<StorageClient> storage_;
   std::unique_ptr<TradingEngine> engine_;
   std::unique_ptr<HttpServer> http_;
+  std::unique_ptr<WsServer> ws_;
 
   TimerId commit_timer_ = 0;
 };

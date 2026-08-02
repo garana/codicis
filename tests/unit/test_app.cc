@@ -9,6 +9,8 @@
 #include "codicis/app/server.h"
 #include "codicis/config/config.h"
 #include "codicis/event/event_loop.h"
+#include "codicis/net/ws_frame.h"
+#include "codicis/util/buffer.h"
 #include "codicis/util/clock.h"
 
 #include <arpa/inet.h>
@@ -17,6 +19,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -92,7 +95,7 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
   const std::string helper_flag =
       std::string("--storage.helper_cmd=") + CODICIS_STORAGE_HELPER_PATH;
   std::vector<const char*> argv = {"codicis", "--net.http_port=0",
-                                   helper_flag.c_str()};
+                                   "--net.ws_port=0", helper_flag.c_str()};
   Result<Config> cfg =
       Config::load(reg, static_cast<int>(argv.size()), argv.data());
   REQUIRE(cfg.ok());
@@ -135,4 +138,102 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
     std::string resp = RoundTrip(loop, port, Post("/orders", "side=buy"));
     REQUIRE(resp.rfind("HTTP/1.1 400", 0) == 0);
   }
+}
+
+namespace {
+
+const std::array<std::uint8_t, 4> kWsMask = {0x11, 0x22, 0x33, 0x44};
+
+/** @brief Open a WebSocket connection to @p port and complete the handshake. */
+int WsConnect(EventLoop& loop, std::uint16_t port) {
+  const int c = ConnectLoopback(port);
+  REQUIRE(c >= 0);
+  const std::string handshake =
+      "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+      "Connection: Upgrade\r\n"
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+      "Sec-WebSocket-Version: 13\r\n\r\n";
+  REQUIRE(::send(c, handshake.data(), handshake.size(), 0) ==
+          static_cast<ssize_t>(handshake.size()));
+  const int flags = ::fcntl(c, F_GETFL, 0);
+  ::fcntl(c, F_SETFL, flags | O_NONBLOCK);
+
+  std::string resp;
+  for (int i = 0; i < 100 && resp.find("\r\n\r\n") == std::string::npos; ++i) {
+    loop.run_once(5);
+    char buf[2048];
+    ssize_t n = 0;
+    while ((n = ::recv(c, buf, sizeof(buf), 0)) > 0) {
+      resp.append(buf, static_cast<std::size_t>(n));
+    }
+  }
+  REQUIRE(resp.rfind("HTTP/1.1 101", 0) == 0);
+  return c;
+}
+
+/** @brief Send an order over the WS connection and return the reply payload. */
+std::string WsSubmit(EventLoop& loop, int c, const std::string& body) {
+  const std::string frame = EncodeWsFrame(WsOpcode::kText, body, true, kWsMask);
+  std::size_t sent = 0;
+  for (int i = 0; i < 100 && sent < frame.size(); ++i) {
+    const ssize_t n = ::send(c, frame.data() + sent, frame.size() - sent, 0);
+    if (n > 0) {
+      sent += static_cast<std::size_t>(n);
+    } else {
+      loop.run_once(5);
+    }
+  }
+
+  Buffer rb;
+  WsFrame f;
+  std::string err;
+  for (int i = 0; i < 200; ++i) {
+    loop.run_once(5);
+    char buf[4096];
+    ssize_t n = 0;
+    while ((n = ::recv(c, buf, sizeof(buf), 0)) > 0) {
+      rb.append(buf, static_cast<std::size_t>(n));
+    }
+    if (DecodeWsFrame(rb, &f, &err) == WsDecode::kComplete) {
+      return f.payload;
+    }
+  }
+  return "";
+}
+
+}  // namespace
+
+TEST_CASE("WebSocket order submission matches end-to-end", "[app][ws]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string helper_flag =
+      std::string("--storage.helper_cmd=") + CODICIS_STORAGE_HELPER_PATH;
+  std::vector<const char*> argv = {"codicis", "--net.http_port=0",
+                                   "--net.ws_port=0", helper_flag.c_str()};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t wsport = server.ws_port();
+  REQUIRE(wsport != 0);
+
+  const int c = WsConnect(loop, wsport);
+
+  // Two orders on one WebSocket connection: a resting sell, then a crossing buy.
+  const std::string r1 =
+      WsSubmit(loop, c, "side=sell&type=limit&price=100&qty=10");
+  REQUIRE(r1.find("\"accepted\":true") != std::string::npos);
+
+  const std::string r2 =
+      WsSubmit(loop, c, "side=buy&type=limit&price=100&qty=10");
+  REQUIRE(r2.find("\"filled\":10") != std::string::npos);
+  REQUIRE(r2.find("\"maker\":1") != std::string::npos);
+
+  ::close(c);
 }

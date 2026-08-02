@@ -11,6 +11,8 @@ OptionRegistry BuildOptionRegistry() {
   OptionRegistry reg;
   reg.add_int_range("net.http_port", 8080, 0, 65535,
                     "TCP port for the HTTP REST API (0 = ephemeral)");
+  reg.add_int_range("net.ws_port", 8081, 0, 65535,
+                    "TCP port for the WebSocket API (0 = ephemeral)");
   reg.add_string("net.bind_address", "127.0.0.1",
                  "IPv4 address to bind listeners to");
   reg.add_int_range("book.mem_levels", 100, 1, 1'000'000,

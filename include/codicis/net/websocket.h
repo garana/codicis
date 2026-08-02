@@ -48,15 +48,22 @@ class WsConnection final : public IoHandler {
    * @brief Construct over an accepted descriptor (owned here).
    * @param loop       The event loop (must outlive this).
    * @param fd         The accepted, non-blocking descriptor.
+   * @param id         A unique connection id (never reused).
    * @param on_message Message callback.
    * @param on_close   Owner callback invoked once when the connection closes.
    */
-  WsConnection(EventLoop& loop, int fd, WsMessageFn on_message,
-               std::function<void(int)> on_close);
+  WsConnection(EventLoop& loop, int fd, std::uint64_t id,
+               WsMessageFn on_message, std::function<void(int)> on_close);
 
   ~WsConnection() override;
 
   void on_io_ready(int fd, IoEvents events) override;
+
+  /** @return This connection's descriptor. */
+  int fd() const { return fd_; }
+
+  /** @return This connection's unique id. */
+  std::uint64_t id() const { return id_; }
 
   /**
    * @brief Send a text message (single unfragmented frame).
@@ -92,6 +99,7 @@ class WsConnection final : public IoHandler {
 
   EventLoop& loop_;
   int fd_;
+  std::uint64_t id_;
   WsMessageFn on_message_;
   std::function<void(int)> on_close_;
 
@@ -141,6 +149,18 @@ class WsServer {
   /** @return The number of currently open connections. */
   std::size_t connection_count() const { return conns_.size(); }
 
+  /**
+   * @brief Send a text message to a connection, if it still exists.
+   *
+   * Looks up the connection by @p fd and verifies @p id (guarding against a
+   * descriptor reused by a newer connection); drops the message if the
+   * original connection is gone. Safe to call from a deferred callback.
+   * @param fd   The connection's descriptor.
+   * @param id   The connection's unique id.
+   * @param text The message to send.
+   */
+  void deliver_text(int fd, std::uint64_t id, std::string_view text);
+
  private:
   void on_accept(int fd);
   void close_connection(int fd);
@@ -149,6 +169,7 @@ class WsServer {
   WsMessageFn on_message_;
   std::unique_ptr<TcpListener> listener_;
   std::unordered_map<int, std::unique_ptr<WsConnection>> conns_;
+  std::uint64_t next_conn_id_ = 1;
 };
 
 }  // namespace codicis

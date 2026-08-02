@@ -264,6 +264,13 @@ Linux (CI/container) during hardening.
       committed on a periodic timer. End-to-end app test (spawned helper) plus
       a verified curl smoke test. NB: strict report-before-place ordering and
       async HTTP responses are deferred to OT8.
+      Both transports now serve orders: a WebSocket endpoint on `net.ws_port`
+      (default 8081) accepts the same form-encoded order body as a text frame
+      and streams back the JSON result, submitting through the same
+      TradingEngine. Order parsing/rendering is shared between HTTP and WS; the
+      async reply routes back through WsServer keyed by (fd, connection id) so
+      it is dropped safely if the client disconnects. Covered by an end-to-end
+      WS integration test and a live Python-client smoke test.
 - [~] OT0-OT8 Order types (matching engine) -- in progress:
       - [x] OT0 domain types (integer-tick prices, SeqNo time priority,
             orthogonal type/TIF/flag axes + optional trigger/peg/link payloads)

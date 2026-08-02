@@ -21,10 +21,12 @@ constexpr std::size_t kReadChunk = 16 * 1024;
 
 // ---- WsConnection ----------------------------------------------------------
 
-WsConnection::WsConnection(EventLoop& loop, int fd, WsMessageFn on_message,
+WsConnection::WsConnection(EventLoop& loop, int fd, std::uint64_t id,
+                           WsMessageFn on_message,
                            std::function<void(int)> on_close)
     : loop_(loop),
       fd_(fd),
+      id_(id),
       on_message_(std::move(on_message)),
       on_close_(std::move(on_close)) {}
 
@@ -261,12 +263,21 @@ std::uint16_t WsServer::port() const {
 }
 
 void WsServer::on_accept(int fd) {
+  const std::uint64_t id = next_conn_id_++;
   auto conn = std::make_unique<WsConnection>(
-      loop_, fd, on_message_, [this](int cfd) { close_connection(cfd); });
+      loop_, fd, id, on_message_, [this](int cfd) { close_connection(cfd); });
   if (Status s = loop_.add(fd, IoInterest::kRead, conn.get()); !s.ok()) {
     return;  // conn destructs, closing fd.
   }
   conns_.emplace(fd, std::move(conn));
+}
+
+void WsServer::deliver_text(int fd, std::uint64_t id, std::string_view text) {
+  const auto it = conns_.find(fd);
+  if (it == conns_.end() || it->second->id() != id) {
+    return;  // connection gone, or fd reused by a newer connection
+  }
+  it->second->send_text(text);
 }
 
 void WsServer::close_connection(int fd) {

@@ -34,6 +34,11 @@ curl -s -X POST --data 'side=buy&type=limit&price=105&qty=4' \
 curl -s -X POST --data 'id=1' localhost:8080/orders/cancel
 ```
 
+WebSocket clients connect to `net.ws_port` (default 8081), send the opening
+RFC 6455 handshake, then submit orders as text frames using the same
+form-encoded body; the JSON result is streamed back as a text frame. For
+example: `side=sell&type=limit&price=100&qty=10`.
+
 Every option is also settable via a config file (see
 `config/codicis.example.conf`); CLI flags override file values.
 
