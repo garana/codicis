@@ -18,6 +18,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 #include "codicis/config/config.h"
 #include "codicis/core/order_book.h"
@@ -71,6 +74,12 @@ class AppServer : public TimerHandler {
   void handle_ws_message(WsConnection& conn, bool is_binary,
                          std::string_view payload);
 
+  /**
+   * @brief Push a market-data update (top of book + trades) to subscribers.
+   * @param trades Trades that just occurred (may be empty for a book change).
+   */
+  void broadcast_market_data(const std::vector<Trade>& trades);
+
   EventLoop& loop_;
   const Config& config_;
 
@@ -82,6 +91,9 @@ class AppServer : public TimerHandler {
   std::unique_ptr<TradingEngine> engine_;
   std::unique_ptr<HttpServer> http_;
   std::unique_ptr<WsServer> ws_;
+
+  // Market-data subscribers: connection id -> descriptor (for ws_->deliver).
+  std::unordered_map<std::uint64_t, int> md_subscribers_;
 
   TimerId commit_timer_ = 0;
 };

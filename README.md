@@ -39,6 +39,12 @@ RFC 6455 handshake, then submit orders as text frames using the same
 form-encoded body; the JSON result is streamed back as a text frame. For
 example: `side=sell&type=limit&price=100&qty=10`.
 
+A client can also subscribe to the market-data stream by sending
+`action=subscribe`. It then receives a top-of-book + trades update whenever the
+book changes, e.g.
+`{"type":"md","bid":null,"bid_qty":0,"ask":100,"ask_qty":6,"trades":[{"price":100,"qty":4}]}`.
+Send `action=unsubscribe` to stop.
+
 Every option is also settable via a config file (see
 `config/codicis.example.conf`); CLI flags override file values.
 

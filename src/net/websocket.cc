@@ -243,8 +243,11 @@ void WsConnection::close() {
 
 // ---- WsServer --------------------------------------------------------------
 
-WsServer::WsServer(EventLoop& loop, WsMessageFn on_message)
-    : loop_(loop), on_message_(std::move(on_message)) {}
+WsServer::WsServer(EventLoop& loop, WsMessageFn on_message,
+                   WsCloseFn on_close)
+    : loop_(loop),
+      on_message_(std::move(on_message)),
+      on_close_(std::move(on_close)) {}
 
 WsServer::~WsServer() = default;
 
@@ -281,6 +284,12 @@ void WsServer::deliver_text(int fd, std::uint64_t id, std::string_view text) {
 }
 
 void WsServer::close_connection(int fd) {
+  if (on_close_) {
+    const auto it = conns_.find(fd);
+    if (it != conns_.end()) {
+      on_close_(it->second->id());
+    }
+  }
   loop_.remove(fd);
   loop_.defer([this, fd]() { conns_.erase(fd); });
 }

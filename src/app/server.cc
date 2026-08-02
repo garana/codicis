@@ -220,6 +220,27 @@ std::string ResultBody(const TradingEngine::Result& res) {
   return SubmitBody(res.outcome);
 }
 
+/** @brief Top-of-book JSON fields: "bid",... ,"ask",... (no braces). */
+std::string BookTopFields(const OrderBook& book) {
+  std::ostringstream f;
+  Ticks bid = 0;
+  Ticks ask = 0;
+  if (book.best_bid(&bid)) {
+    f << "\"bid\":" << bid
+      << ",\"bid_qty\":" << book.total_qty_at(Side::Buy, bid);
+  } else {
+    f << "\"bid\":null,\"bid_qty\":0";
+  }
+  f << ",";
+  if (book.best_ask(&ask)) {
+    f << "\"ask\":" << ask
+      << ",\"ask_qty\":" << book.total_qty_at(Side::Sell, ask);
+  } else {
+    f << "\"ask\":null,\"ask_qty\":0";
+  }
+  return f.str();
+}
+
 }  // namespace
 
 AppServer::AppServer(EventLoop& loop, const Config& config)
@@ -265,12 +286,13 @@ Status AppServer::start() {
     return s;
   }
 
-  // WebSocket endpoint: clients submit orders and receive results as text.
+  // WebSocket endpoint: clients submit orders and/or subscribe to market data.
   ws_ = std::make_unique<WsServer>(
-      loop_, [this](WsConnection& conn, bool is_binary,
-                    std::string_view payload) {
+      loop_,
+      [this](WsConnection& conn, bool is_binary, std::string_view payload) {
         handle_ws_message(conn, is_binary, payload);
-      });
+      },
+      [this](std::uint64_t id) { md_subscribers_.erase(id); });
   const auto ws_port_cfg = static_cast<std::uint16_t>(
       config_.get_int("net.ws_port").value());
   if (Status s = ws_->listen(addr, ws_port_cfg); !s.ok()) {
@@ -333,7 +355,7 @@ void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
 
   // Report-before-place: the engine reports the order to storage first, and
   // reports the resulting trades and fills; we respond once it has placed.
-  engine_->submit(order, [respond](const TradingEngine::Result& res) {
+  engine_->submit(order, [this, respond](const TradingEngine::Result& res) {
     HttpResponse resp;
     resp.set_header("Content-Type", "application/json");
     if (!res.storage_ok) {
@@ -345,25 +367,46 @@ void AppServer::handle_submit(const HttpRequest& req, HttpResponder respond) {
     }
     resp.body = ResultBody(res);
     respond(std::move(resp));
+    if (res.storage_ok && res.outcome.accepted) {
+      broadcast_market_data(res.outcome.trades);
+    }
   });
 }
 
 void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
                                   std::string_view payload) {
-  // WebSocket clients submit orders in the same form-encoded body as REST and
-  // receive the JSON result as a text message.
+  const auto form = ParseForm(payload);
+
+  // A market-data subscription request (rather than an order).
+  if (const std::string* action = FormGet(form, "action")) {
+    if (*action == "subscribe") {
+      md_subscribers_[conn.id()] = conn.fd();
+      conn.send_text("{\"subscribed\":true}");
+      return;
+    }
+    if (*action == "unsubscribe") {
+      md_subscribers_.erase(conn.id());
+      conn.send_text("{\"subscribed\":false}");
+      return;
+    }
+  }
+
+  // Otherwise submit an order (same form-encoded body as REST). The engine
+  // callback fires later; route the reply back through the server keyed by
+  // (fd, id) so it is dropped safely if the connection is gone.
   Order order;
   std::string err;
-  if (!ParseOrderForm(ParseForm(payload), &order, &err)) {
+  if (!ParseOrderForm(form, &order, &err)) {
     conn.send_text(JsonErrorBody(err));
     return;
   }
-  // The engine callback fires later; route the reply back through the server
-  // keyed by (fd, id) so it is dropped safely if the connection is gone.
   const int fd = conn.fd();
   const std::uint64_t id = conn.id();
   engine_->submit(order, [this, fd, id](const TradingEngine::Result& res) {
     ws_->deliver_text(fd, id, ResultBody(res));
+    if (res.storage_ok && res.outcome.accepted) {
+      broadcast_market_data(res.outcome.trades);
+    }
   });
 }
 
@@ -378,30 +421,35 @@ void AppServer::handle_cancel(const HttpRequest& req, HttpResponse& resp) {
   resp.set_status(ok ? 200 : 404);
   resp.set_header("Content-Type", "application/json");
   resp.body = std::string("{\"cancelled\":") + (ok ? "true" : "false") + "}";
+  if (ok) {
+    broadcast_market_data({});  // the top of book may have changed
+  }
 }
 
 void AppServer::handle_book(const HttpRequest& /*req*/, HttpResponse& resp) {
-  std::ostringstream body;
-  body << "{";
-  Ticks bid = 0;
-  Ticks ask = 0;
-  if (book_.best_bid(&bid)) {
-    body << "\"bid\":" << bid
-         << ",\"bid_qty\":" << book_.total_qty_at(Side::Buy, bid);
-  } else {
-    body << "\"bid\":null,\"bid_qty\":0";
-  }
-  body << ",";
-  if (book_.best_ask(&ask)) {
-    body << "\"ask\":" << ask
-         << ",\"ask_qty\":" << book_.total_qty_at(Side::Sell, ask);
-  } else {
-    body << "\"ask\":null,\"ask_qty\":0";
-  }
-  body << "}";
   resp.set_status(200);
   resp.set_header("Content-Type", "application/json");
-  resp.body = body.str();
+  resp.body = "{" + BookTopFields(book_) + "}";
+}
+
+void AppServer::broadcast_market_data(const std::vector<Trade>& trades) {
+  if (md_subscribers_.empty()) {
+    return;
+  }
+  std::ostringstream m;
+  m << "{\"type\":\"md\"," << BookTopFields(book_) << ",\"trades\":[";
+  for (std::size_t i = 0; i < trades.size(); ++i) {
+    if (i != 0) {
+      m << ",";
+    }
+    m << "{\"price\":" << trades[i].price << ",\"qty\":" << trades[i].qty
+      << "}";
+  }
+  m << "]}";
+  const std::string msg = m.str();
+  for (const auto& [id, fd] : md_subscribers_) {
+    ws_->deliver_text(fd, id, msg);
+  }
 }
 
 }  // namespace codicis

@@ -171,8 +171,8 @@ int WsConnect(EventLoop& loop, std::uint16_t port) {
   return c;
 }
 
-/** @brief Send an order over the WS connection and return the reply payload. */
-std::string WsSubmit(EventLoop& loop, int c, const std::string& body) {
+/** @brief Send a masked text frame over the WS connection (no wait). */
+void WsSend(EventLoop& loop, int c, const std::string& body) {
   const std::string frame = EncodeWsFrame(WsOpcode::kText, body, true, kWsMask);
   std::size_t sent = 0;
   for (int i = 0; i < 100 && sent < frame.size(); ++i) {
@@ -183,7 +183,10 @@ std::string WsSubmit(EventLoop& loop, int c, const std::string& body) {
       loop.run_once(5);
     }
   }
+}
 
+/** @brief Pump the loop and return the next decoded text frame payload. */
+std::string WsRecvFrame(EventLoop& loop, int c) {
   Buffer rb;
   WsFrame f;
   std::string err;
@@ -199,6 +202,12 @@ std::string WsSubmit(EventLoop& loop, int c, const std::string& body) {
     }
   }
   return "";
+}
+
+/** @brief Send an order/request and return the single reply payload. */
+std::string WsSubmit(EventLoop& loop, int c, const std::string& body) {
+  WsSend(loop, c, body);
+  return WsRecvFrame(loop, c);
 }
 
 }  // namespace
@@ -236,4 +245,46 @@ TEST_CASE("WebSocket order submission matches end-to-end", "[app][ws]") {
   REQUIRE(r2.find("\"maker\":1") != std::string::npos);
 
   ::close(c);
+}
+
+TEST_CASE("WebSocket subscribers receive market-data updates", "[app][ws][md]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string helper_flag =
+      std::string("--storage.helper_cmd=") + CODICIS_STORAGE_HELPER_PATH;
+  std::vector<const char*> argv = {"codicis", "--net.http_port=0",
+                                   "--net.ws_port=0", helper_flag.c_str()};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t wsport = server.ws_port();
+
+  const int sub = WsConnect(loop, wsport);
+  REQUIRE(WsSubmit(loop, sub, "action=subscribe")
+              .find("\"subscribed\":true") != std::string::npos);
+
+  const int ord = WsConnect(loop, wsport);
+
+  // A resting sell over the order connection publishes a book update.
+  WsSend(loop, ord, "side=sell&type=limit&price=100&qty=10");
+  REQUIRE(WsRecvFrame(loop, ord).find("\"accepted\":true") != std::string::npos);
+  const std::string md1 = WsRecvFrame(loop, sub);
+  REQUIRE(md1.find("\"type\":\"md\"") != std::string::npos);
+  REQUIRE(md1.find("\"ask\":100") != std::string::npos);
+
+  // A crossing buy publishes the resulting trade in the market-data stream.
+  WsSend(loop, ord, "side=buy&type=limit&price=100&qty=4");
+  REQUIRE(WsRecvFrame(loop, ord).find("\"filled\":4") != std::string::npos);
+  const std::string md2 = WsRecvFrame(loop, sub);
+  REQUIRE(md2.find("\"trades\":[{\"price\":100,\"qty\":4}]") !=
+          std::string::npos);
+
+  ::close(sub);
+  ::close(ord);
 }

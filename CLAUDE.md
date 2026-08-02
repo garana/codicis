@@ -271,6 +271,13 @@ Linux (CI/container) during hardening.
       async reply routes back through WsServer keyed by (fd, connection id) so
       it is dropped safely if the client disconnects. Covered by an end-to-end
       WS integration test and a live Python-client smoke test.
+      WebSocket clients can also subscribe to a market-data stream
+      (`action=subscribe`/`unsubscribe`): AppServer tracks subscribers (dropped
+      on disconnect via a new WsServer on-close callback) and, after any
+      accepted order or successful cancel, broadcasts a top-of-book + trades
+      update to them. Covered by a two-connection integration test (subscriber
+      receives the resting-ask snapshot and the trade print) and a live smoke
+      test.
 - [~] OT0-OT8 Order types (matching engine) -- in progress:
       - [x] OT0 domain types (integer-tick prices, SeqNo time priority,
             orthogonal type/TIF/flag axes + optional trigger/peg/link payloads)

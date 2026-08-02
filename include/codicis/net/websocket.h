@@ -40,6 +40,12 @@ using WsMessageFn = std::function<void(WsConnection& conn, bool is_binary,
                                        std::string_view payload)>;
 
 /**
+ * @brief Callback invoked when a connection closes.
+ * @param id The closing connection's unique id.
+ */
+using WsCloseFn = std::function<void(std::uint64_t id)>;
+
+/**
  * @brief One WebSocket connection: handshake, then framed messaging.
  */
 class WsConnection final : public IoHandler {
@@ -127,8 +133,11 @@ class WsServer {
    * @brief Construct a server.
    * @param loop       The event loop (must outlive the server).
    * @param on_message Callback invoked per complete message.
+   * @param on_close   Optional callback invoked when a connection closes (so
+   *                   owners can drop per-connection state such as market-data
+   *                   subscriptions).
    */
-  WsServer(EventLoop& loop, WsMessageFn on_message);
+  WsServer(EventLoop& loop, WsMessageFn on_message, WsCloseFn on_close = {});
 
   ~WsServer();
 
@@ -167,6 +176,7 @@ class WsServer {
 
   EventLoop& loop_;
   WsMessageFn on_message_;
+  WsCloseFn on_close_;
   std::unique_ptr<TcpListener> listener_;
   std::unordered_map<int, std::unique_ptr<WsConnection>> conns_;
   std::uint64_t next_conn_id_ = 1;
