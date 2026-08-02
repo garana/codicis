@@ -134,6 +134,14 @@ The full master plan lives at
 - **Sparse-book fallback.** The dense ladder's memory is proportional to the
   in-window tick span; add a hash-index fallback for pathologically sparse
   instruments.
+- **Maker-side AON (all-or-none).** AON is enforced only on the aggressor
+  (a pre-scan); a *resting* AON order is currently partially fillable, which
+  violates AON semantics. The matcher should skip a resting AON maker when the
+  aggressor cannot take its whole remaining size (an intentional FIFO priority
+  inversion). Needs the inner match loop to iterate/skip rather than always
+  consume the front, coordinating with the STP and iceberg re-queue paths.
+  Tracked by the `[!shouldfail]` case in tests/unit/test_matrix.cc -- remove
+  the tag once implemented.
 - **Move Order's conditional axes out-of-line (owning pointer).** Measured on
   arm64/libc++, the three inline `std::optional<TriggerSpec/PegSpec/LinkSpec>`
   members are 104 of `Order`'s 192 bytes (54%) and are disengaged for every

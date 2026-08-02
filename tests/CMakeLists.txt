@@ -41,6 +41,10 @@ codicis_add_test(test_order_book
   unit/test_order_book.cc)
 target_link_libraries(test_order_book PRIVATE codicis_core)
 
+codicis_add_test(test_matrix
+  unit/test_matrix.cc)
+target_link_libraries(test_matrix PRIVATE codicis_core)
+
 codicis_add_test(test_ipc
   unit/test_ipc.cc)
 target_link_libraries(test_ipc PRIVATE codicis_ipc)
