@@ -239,91 +239,165 @@ struct OrderBook::Impl {
   }
 
   /**
-   * @brief Match aggressor o against the opposite side, appending trades.
+   * @brief Match aggressor o against one price level's FIFO.
+   *
+   * Iterates the queue rather than only its head so it can: skip a resting
+   * all-or-none maker that o cannot fully fill (a deliberate FIFO priority
+   * inversion -- orders behind it may still fill); re-queue an exhausted
+   * iceberg slice at the back; and apply self-trade prevention. A pass that
+   * fills nothing (only unfillable AON makers remain) ends the level.
+   * @param o      The aggressor (mutated).
+   * @param opp    The opposite ladder (for best-cache invalidation).
+   * @param lvl    The level being matched.
+   * @param p      The level's price.
+   * @param trades Output executions (appended).
+   * @return True if self-trade prevention cancelled the aggressor remainder.
+   */
+  bool match_level(Order& o, Ladder& opp, Level& lvl, Ticks p,
+                   std::vector<Trade>& trades) {
+    auto it = lvl.fifo.begin();
+    bool progressed = false;
+    while (o.leaves > 0) {
+      if (it == lvl.fifo.end()) {
+        if (!progressed) {
+          break;  // a full pass filled nothing: only unfillable AON remains
+        }
+        it = lvl.fifo.begin();
+        progressed = false;
+        continue;
+      }
+      const OrderId mid = *it;
+      Entry& me = orders.at(mid);
+
+      // Self-trade prevention: same non-zero account on both sides.
+      if (stp != StpPolicy::kNone && o.client_id != 0 &&
+          me.order.client_id == o.client_id) {
+        const bool cancel_resting = stp == StpPolicy::kCancelResting ||
+                                    stp == StpPolicy::kCancelBoth;
+        const bool cancel_aggressor = stp == StpPolicy::kCancelAggressor ||
+                                      stp == StpPolicy::kCancelBoth;
+        if (cancel_resting) {
+          lvl.total -= me.order.leaves;
+          lvl.displayed -=
+              DisplayedOf(me.order.flags, me.order.leaves, me.slice);
+          it = lvl.fifo.erase(it);
+          orders.erase(mid);
+          pegged.erase(mid);
+          progressed = true;
+        }
+        if (cancel_aggressor) {
+          if (lvl.total == 0) {
+            opp.on_removed(p);
+          }
+          return true;  // aggressor remainder cancelled; stop matching
+        }
+        continue;  // kCancelResting: maker gone, try the next maker
+      }
+
+      // Maker-side all-or-none: fillable only in full, else skip it.
+      if (HasFlag(me.order.flags, OrderFlag::kAon) &&
+          o.leaves < me.order.leaves) {
+        ++it;
+        continue;
+      }
+
+      const bool iceberg = HasFlag(me.order.flags, OrderFlag::kIceberg);
+      const bool hidden = HasFlag(me.order.flags, OrderFlag::kHidden);
+      // An iceberg exposes only its current slice to a single fill; other
+      // orders expose their full remainder.
+      const Quantity avail = iceberg ? me.slice : me.order.leaves;
+      const Quantity fill = std::min(o.leaves, avail);
+      trades.push_back(Trade{.taker_id = o.id,
+                             .maker_id = mid,
+                             .taker_side = o.side,
+                             .price = p,
+                             .qty = fill});
+      last_price = p;  // stop-trigger reference
+      have_last = true;
+      o.leaves -= fill;
+      o.filled += fill;
+      me.order.leaves -= fill;
+      me.order.filled += fill;
+      lvl.total -= fill;
+      if (!hidden) {
+        lvl.displayed -= fill;  // displayed tracks leaves (normal) / slice
+      }
+      if (iceberg) {
+        me.slice -= fill;
+      }
+
+      if (me.order.leaves == 0) {
+        it = lvl.fifo.erase(it);
+        orders.erase(mid);
+        pegged.erase(mid);  // no-op unless it was a pegged order
+        progressed = true;
+      } else if (iceberg && me.slice == 0) {
+        // Slice exhausted: replenish from the reserve and re-queue at the back
+        // of the level (losing time priority); continue with the next order.
+        const auto next = std::next(it);
+        lvl.fifo.splice(lvl.fifo.end(), lvl.fifo, it);
+        me.pos = std::prev(lvl.fifo.end());
+        me.slice = std::min(me.order.display_qty, me.order.leaves);
+        lvl.displayed += me.slice;
+        it = next;
+        progressed = true;
+      } else {
+        // Partial fill of a non-iceberg maker: the aggressor is now exhausted.
+        progressed = true;
+        ++it;
+      }
+    }
+    if (lvl.total == 0) {
+      opp.on_removed(p);
+    }
+    return false;
+  }
+
+  /**
+   * @brief Match aggressor o against the opposite side, best price first.
    * @param o      The aggressor (mutated: leaves/filled).
    * @param trades Output executions.
-   * @return True if self-trade prevention cancelled the aggressor remainder
-   *         (so it must not rest).
+   * @return True if self-trade prevention cancelled the aggressor remainder.
    */
   bool match(Order& o, std::vector<Trade>& trades) {
     Ladder& opp = ladder(Opposite(o.side));
-    while (o.leaves > 0) {
-      Ticks bp;
-      if (!opp.best(&bp)) {
-        break;
+    if (!opp.has_base) {
+      return false;
+    }
+    auto acceptable = [&](Ticks p) {
+      if (o.type == OrdType::Market) {
+        return true;
       }
-      if (o.type == OrdType::Limit) {
-        const bool cross = o.side == Side::Buy ? o.price >= bp : o.price <= bp;
-        if (!cross) {
+      return o.side == Side::Buy ? o.price >= p : o.price <= p;
+    };
+    const std::size_t n = opp.levels.size();
+    // Walk resident levels from best outward while the price still crosses. A
+    // level yielding no fill (e.g. only unfillable AON makers) is stepped over.
+    if (opp.side == Side::Sell) {  // asks: lowest price is best
+      for (std::size_t i = 0; i < n && o.leaves > 0; ++i) {
+        const Ticks p = opp.base + static_cast<Ticks>(i);
+        if (opp.levels[i].total == 0) {
+          continue;
+        }
+        if (!acceptable(p)) {
           break;
         }
-      }
-      Level* lvl = opp.at(bp);
-      while (o.leaves > 0 && lvl != nullptr && !lvl->fifo.empty()) {
-        const OrderId mid = lvl->fifo.front();
-        Entry& me = orders.at(mid);
-
-        // Self-trade prevention: same non-zero account on both sides.
-        if (stp != StpPolicy::kNone && o.client_id != 0 &&
-            me.order.client_id == o.client_id) {
-          const bool cancel_resting = stp == StpPolicy::kCancelResting ||
-                                      stp == StpPolicy::kCancelBoth;
-          const bool cancel_aggressor = stp == StpPolicy::kCancelAggressor ||
-                                        stp == StpPolicy::kCancelBoth;
-          if (cancel_resting) {
-            lvl->total -= me.order.leaves;
-            lvl->fifo.pop_front();
-            orders.erase(mid);
-          }
-          if (cancel_aggressor) {
-            if (lvl->total == 0) {
-              opp.on_removed(bp);
-            }
-            return true;  // aggressor remainder cancelled; stop matching
-          }
-          continue;  // kCancelResting: maker gone, try the next maker
-        }
-
-        const bool iceberg = HasFlag(me.order.flags, OrderFlag::kIceberg);
-        const bool hidden = HasFlag(me.order.flags, OrderFlag::kHidden);
-        // An iceberg exposes only its current slice to a single fill; other
-        // orders expose their full remainder.
-        const Quantity avail = iceberg ? me.slice : me.order.leaves;
-        const Quantity fill = std::min(o.leaves, avail);
-        trades.push_back(Trade{.taker_id = o.id,
-                               .maker_id = mid,
-                               .taker_side = o.side,
-                               .price = bp,
-                               .qty = fill});
-        last_price = bp;  // stop-trigger reference
-        have_last = true;
-        o.leaves -= fill;
-        o.filled += fill;
-        me.order.leaves -= fill;
-        me.order.filled += fill;
-        lvl->total -= fill;
-        if (!hidden) {
-          lvl->displayed -= fill;  // displayed tracks leaves (normal) / slice
-        }
-        if (iceberg) {
-          me.slice -= fill;
-        }
-        if (me.order.leaves == 0) {
-          lvl->fifo.pop_front();
-          orders.erase(mid);
-          pegged.erase(mid);  // no-op unless it was a pegged order
-        } else if (iceberg && me.slice == 0) {
-          // Slice exhausted: replenish from the reserve and re-queue at the
-          // back of the level, losing time priority (standard iceberg rule).
-          me.slice = std::min(me.order.display_qty, me.order.leaves);
-          lvl->displayed += me.slice;
-          lvl->fifo.pop_front();
-          lvl->fifo.push_back(mid);
-          me.pos = std::prev(lvl->fifo.end());
+        if (match_level(o, opp, opp.levels[i], p, trades)) {
+          return true;
         }
       }
-      if (lvl != nullptr && lvl->total == 0) {
-        opp.on_removed(bp);
+    } else {  // bids: highest price is best
+      for (std::size_t i = n; i-- > 0 && o.leaves > 0;) {
+        const Ticks p = opp.base + static_cast<Ticks>(i);
+        if (opp.levels[i].total == 0) {
+          continue;
+        }
+        if (!acceptable(p)) {
+          break;
+        }
+        if (match_level(o, opp, opp.levels[i], p, trades)) {
+          return true;
+        }
       }
     }
     return false;
@@ -695,11 +769,20 @@ SubmitOutcome OrderBook::submit(Order order) {
     return out;
   }
 
-  // FOK / AON: all-or-none, so pre-scan before emitting any trade.
+  // All-or-none: never partially fill. If it cannot be fully filled now, an
+  // immediate order (IOC/FOK/market) is rejected, while a resting (GTC/DAY)
+  // AON order rests as a maker -- the matcher skips it until it can fill in
+  // full. When it is fully fillable, fall through and match completely.
   if (HasFlag(order.flags, OrderFlag::kAon)) {
     if (impl_->available_fill(order) < order.leaves) {
-      out.accepted = false;
-      out.reject_reason = "all-or-none not fully fillable";
+      if (order.tif == Tif::IOC || order.type == OrdType::Market) {
+        out.accepted = false;
+        out.reject_reason = "all-or-none not fully fillable";
+        return out;
+      }
+      impl_->rest(order);
+      out.rested = true;
+      impl_->reprice_pegs();
       return out;
     }
   }

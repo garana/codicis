@@ -134,14 +134,15 @@ The full master plan lives at
 - **Sparse-book fallback.** The dense ladder's memory is proportional to the
   in-window tick span; add a hash-index fallback for pathologically sparse
   instruments.
-- **Maker-side AON (all-or-none).** AON is enforced only on the aggressor
-  (a pre-scan); a *resting* AON order is currently partially fillable, which
-  violates AON semantics. The matcher should skip a resting AON maker when the
-  aggressor cannot take its whole remaining size (an intentional FIFO priority
-  inversion). Needs the inner match loop to iterate/skip rather than always
-  consume the front, coordinating with the STP and iceberg re-queue paths.
-  Tracked by the `[!shouldfail]` case in tests/unit/test_matrix.cc -- remove
-  the tag once implemented.
+- **AON pre-scan over-counts AON makers (residual).** Maker-side AON is now
+  implemented (the matcher skips a resting AON maker the aggressor can't fully
+  take, filling past it), but the FOK/AON/Min-Qty pre-scan (`available_fill`)
+  still counts an AON maker's *full* size as available even when the aggressor
+  cannot take it whole. So a FOK/AON/Min-Qty aggressor facing a *larger* AON
+  maker can pass the pre-scan and then fill 0 (FOK then discards; Min-Qty may
+  under-reject). Fix: make `available_fill` AON-aware (count an AON maker only
+  if the running remainder can take it in full). Deep edge; no partial fills
+  result, so low priority.
 - **Move Order's conditional axes out-of-line (owning pointer).** Measured on
   arm64/libc++, the three inline `std::optional<TriggerSpec/PegSpec/LinkSpec>`
   members are 104 of `Order`'s 192 bytes (54%) and are disengaged for every
@@ -268,7 +269,12 @@ Linux (CI/container) during hardening.
       - [x] OT2 constraints: self-trade prevention (kNone/CancelResting/
             CancelAggressor/CancelBoth via client_id), Min-Quantity floor, and
             GTD/DAY expiry (expiry_ns + OrderBook::expire(now) returning
-            cancelled ids for the app to sweep on a timer).
+            cancelled ids for the app to sweep on a timer). Maker-side AON:
+            the matcher walks a level (and levels) skipping a resting AON order
+            the aggressor can't fully take (filling past it -- a deliberate
+            FIFO/price priority inversion); a GTC AON that can't fill on entry
+            rests as an AON maker rather than being rejected (only IOC/FOK/
+            market AON reject).
       - [x] OT3 stops & trailing: stop-market, stop-limit, and trailing-stop
             orders parked in a pending structure keyed off the last trade
             price; a trigger evaluator fires them (inject as market/limit),

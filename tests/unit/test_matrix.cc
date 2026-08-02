@@ -59,7 +59,8 @@ struct Maker {
 /** @brief An aggressor kind (a crossing buy of a given quantity). */
 struct Aggressor {
   std::string name;
-  bool all_or_none;  // rejects rather than partially filling
+  bool all_or_none;  // never partially fills
+  bool immediate;    // IOC-like: rejects rather than resting when unfilled
   std::function<Order(OrderId, Quantity)> build;
 };
 
@@ -85,27 +86,27 @@ std::vector<Maker> Makers() {
 
 std::vector<Aggressor> Aggressors() {
   return {
-      {"limit", false,
+      {"limit", false, false,
        [](OrderId id, Quantity q) {
          return MakeLimit(id, Side::Buy, kCrossPrice, q);
        }},
-      {"market", false,
+      {"market", false, true,
        [](OrderId id, Quantity q) { return MakeMarket(id, Side::Buy, q); }},
-      {"ioc", false,
+      {"ioc", false, true,
        [](OrderId id, Quantity q) {
          return MakeLimit(id, Side::Buy, kCrossPrice, q, Tif::IOC);
        }},
-      {"fok", true,
+      {"fok", true, true,  // IOC + AON: rejects when it cannot fully fill
        [](OrderId id, Quantity q) {
          return MakeLimit(id, Side::Buy, kCrossPrice, q, Tif::FOK);
        }},
-      {"aon", true,
+      {"aon", true, false,  // GTC + AON: rests when it cannot fully fill
        [](OrderId id, Quantity q) {
          Order o = MakeLimit(id, Side::Buy, kCrossPrice, q);
          SetFlag(&o.flags, OrderFlag::kAon);
          return o;
        }},
-      {"minqty", false,
+      {"minqty", false, false,
        [](OrderId id, Quantity q) {
          Order o = MakeLimit(id, Side::Buy, kCrossPrice, q);
          o.min_qty = 2;
@@ -154,9 +155,16 @@ TEST_CASE("Matrix: aggressor larger than maker; all-or-none rejects",
         const SubmitOutcome out = book.submit(agg.build(2, 15));
 
         if (agg.all_or_none) {
-          REQUIRE_FALSE(out.accepted);  // cannot fully fill 15 against 10
+          // All-or-none never partially fills, so the maker is untouched.
+          REQUIRE(out.filled == 0);
           REQUIRE(out.trades.empty());
           REQUIRE(book.total_qty_at(Side::Sell, kMakerPrice) == kMakerQty);
+          if (agg.immediate) {
+            REQUIRE_FALSE(out.accepted);  // FOK rejects
+          } else {
+            REQUIRE(out.accepted);        // GTC AON rests as a maker
+            REQUIRE(out.rested);
+          }
         } else {
           REQUIRE(out.accepted);
           REQUIRE(out.filled == kMakerQty);  // consumes the whole maker
@@ -238,18 +246,57 @@ TEST_CASE("Pegged maker matches like a resting limit", "[matrix][peg]") {
   }
 }
 
-// KNOWN GAP: a resting all-or-none order should only ever be filled in full
-// (the matcher should skip it when the aggressor cannot take its whole size).
-// That maker-side AON handling is not implemented yet -- AON is enforced only
-// on the aggressor. This test asserts the correct behavior and is expected to
-// FAIL until maker-side AON is added; [!shouldfail] tracks it.
-TEST_CASE("Resting AON maker is not partially filled", "[matrix][!shouldfail]") {
+TEST_CASE("Resting AON maker is not partially filled", "[matrix][aon]") {
   OrderBook book;
   Order aon = MakeLimit(1, Side::Sell, kMakerPrice, kMakerQty);
   SetFlag(&aon.flags, OrderFlag::kAon);
   book.submit(aon);
 
-  const SubmitOutcome out = book.submit(MakeLimit(2, Side::Buy, kMakerPrice, 4));
-  REQUIRE(out.trades.empty());  // 4 cannot fully fill the AON maker of 10
-  REQUIRE(book.total_qty_at(Side::Sell, kMakerPrice) == kMakerQty);
+  SECTION("an aggressor too small to fill it is not matched") {
+    const SubmitOutcome out =
+        book.submit(MakeLimit(2, Side::Buy, kMakerPrice, 4));
+    REQUIRE(out.trades.empty());  // 4 cannot fully fill the AON maker of 10
+    REQUIRE(book.total_qty_at(Side::Sell, kMakerPrice) == kMakerQty);
+  }
+  SECTION("an aggressor large enough fills it in full") {
+    const SubmitOutcome out =
+        book.submit(MakeLimit(2, Side::Buy, kMakerPrice, 10));
+    REQUIRE(out.filled == 10);
+    REQUIRE(book.total_qty_at(Side::Sell, kMakerPrice) == 0);
+  }
+}
+
+TEST_CASE("Aggressor fills past an unfillable AON maker to orders behind it",
+          "[matrix][aon]") {
+  OrderBook book;
+  // Best ask is an AON of 10; behind it at the same price sits a plain 5.
+  Order aon = MakeLimit(1, Side::Sell, kMakerPrice, kMakerQty);
+  SetFlag(&aon.flags, OrderFlag::kAon);
+  book.submit(aon);
+  book.submit(MakeLimit(2, Side::Sell, kMakerPrice, 5));
+
+  // A buy of 5 cannot take the AON (needs 10) but fills the plain order behind.
+  const SubmitOutcome out = book.submit(MakeLimit(3, Side::Buy, kMakerPrice, 5));
+  REQUIRE(out.filled == 5);
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].maker_id == 2);          // the order behind the AON
+  REQUIRE(book.total_qty_at(Side::Sell, kMakerPrice) == kMakerQty);  // AON left
+}
+
+TEST_CASE("Aggressor skips an AON best level to fill a worse level",
+          "[matrix][aon]") {
+  OrderBook book;
+  // Best ask 100 is an AON of 10; a plain 5 rests one tick worse at 101.
+  Order aon = MakeLimit(1, Side::Sell, 100, 10);
+  SetFlag(&aon.flags, OrderFlag::kAon);
+  book.submit(aon);
+  book.submit(MakeLimit(2, Side::Sell, 101, 5));
+
+  // A buy limit up to 101 for 5 cannot take the AON at 100, so it trades at 101.
+  const SubmitOutcome out = book.submit(MakeLimit(3, Side::Buy, 101, 5));
+  REQUIRE(out.filled == 5);
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].price == 101);
+  REQUIRE(book.total_qty_at(Side::Sell, 100) == 10);  // AON untouched
+  REQUIRE(book.total_qty_at(Side::Sell, 101) == 0);
 }
