@@ -2,7 +2,8 @@
 
 add_library(codicis_core STATIC
   order.cc
-  order_book.cc)
+  order_book.cc
+  matching_engine.cc)
 
 target_include_directories(codicis_core PUBLIC
   ${CMAKE_SOURCE_DIR}/include)

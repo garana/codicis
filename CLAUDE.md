@@ -382,9 +382,18 @@ Linux (CI/container) during hardening.
             windowing (level eviction) -- currently the book holds all levels
             in memory, so there are no non-resident levels to pull.
       - [ ] OT4 remainder (reduce-only, discretionary), OT7 auctions.
-- [ ] Multi-symbol + market-data architecture (decided; see To Design):
-      per-symbol book registry, external UUIDs, a sequence-numbered book-event
-      stream, and a single feed-helper building L1/L2/L3. Build in that order.
+- [~] Multi-symbol + market-data architecture (decided; see To Design):
+      - [x] Per-symbol book registry: `MatchingEngine` (src/core) owns one
+            OrderBook per Symbol, created on first use, routing submit/cancel/
+            find/best/expire by symbol. Symbol stays off the Order struct.
+            Tested for per-symbol isolation (no cross-symbol matching), scoped
+            cancel (same id in two symbols), and empty-not-error unknown-symbol
+            queries. NOT yet wired into TradingEngine/AppServer (next step:
+            symbol in the request + per-symbol routing/MD).
+      - [ ] Wire MatchingEngine into TradingEngine + AppServer (symbol field on
+            requests, per-symbol /book and market-data), external UUIDs, a
+            sequence-numbered book-event stream, then the feed-helper building
+            L1/L2/L3. Build in that order.
 - [ ] H2 Hardening (robustness): parser fuzzing, bounded outbox + backpressure,
       Linux/epoll validation, load tests. (H1 TLS is dropped -- TLS is
       offloaded to an edge proxy; see To Design.)

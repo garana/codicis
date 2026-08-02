@@ -11,8 +11,12 @@
  */
 
 #include <cstdint>
+#include <string>
 
 namespace codicis {
+
+/** @brief An instrument identifier (kept off the hot Order struct). */
+using Symbol = std::string;
 
 /** @brief A price in integer tick units. */
 using Ticks = std::int64_t;
