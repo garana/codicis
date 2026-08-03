@@ -194,3 +194,43 @@ TEST_CASE("Rejects adversarial framing (H2 hardening)", "[http][parser]") {
     REQUIRE(rejects("GET / HTTP/1.1\r\nBadHeaderNoColon\r\n\r\n"));
   }
 }
+
+TEST_CASE("Rejects unexpected characters (H2 hardening)", "[http][parser]") {
+  auto rejects = [](std::string_view raw) {
+    HttpRequestParser p;
+    Buffer b;
+    Feed(b, raw);
+    return p.parse(b) == Progress::kError;
+  };
+
+  SECTION("space inside the header name") {
+    REQUIRE(rejects("GET / HTTP/1.1\r\nBad Name: x\r\n\r\n"));
+  }
+  SECTION("whitespace before the colon") {
+    REQUIRE(rejects("GET / HTTP/1.1\r\nName : x\r\n\r\n"));
+  }
+  SECTION("control char in the header name") {
+    REQUIRE(rejects("GET / HTTP/1.1\r\nX\x01Y: v\r\n\r\n"));
+  }
+  SECTION("bare LF (control) in a header value") {
+    REQUIRE(rejects("GET / HTTP/1.1\r\nX: a\nb\r\n\r\n"));
+  }
+  SECTION("NUL byte in a header value") {
+    REQUIRE(rejects(std::string("GET / HTTP/1.1\r\nX: a\0b\r\n\r\n", 26)));
+  }
+  SECTION("obsolete line folding (continuation)") {
+    REQUIRE(rejects("GET / HTTP/1.1\r\nX: a\r\n b\r\n\r\n"));
+  }
+  SECTION("control char in the method") {
+    REQUIRE(rejects("GE\x01T / HTTP/1.1\r\n\r\n"));
+  }
+  SECTION("control char in the target") {
+    REQUIRE(rejects("GET /pa\x01th HTTP/1.1\r\n\r\n"));
+  }
+  SECTION("a normal request with tabs in the value is still accepted") {
+    HttpRequestParser p;
+    Buffer b;
+    Feed(b, "GET / HTTP/1.1\r\nX-Note:\tvalue with\ttabs\r\n\r\n");
+    REQUIRE(p.parse(b) == Progress::kComplete);
+  }
+}

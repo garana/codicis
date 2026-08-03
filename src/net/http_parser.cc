@@ -29,6 +29,52 @@ bool IEquals(std::string_view a, std::string_view b) {
   return true;
 }
 
+/** @brief True if @p c is an RFC 7230 token character (tchar). */
+bool IsTokenChar(unsigned char c) {
+  if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+      (c >= 'a' && c <= 'z')) {
+    return true;
+  }
+  switch (c) {
+    case '!': case '#': case '$': case '%': case '&': case '\'': case '*':
+    case '+': case '-': case '.': case '^': case '_': case '`': case '|':
+    case '~':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** @brief True if @p s is a non-empty RFC 7230 token (e.g. a header name). */
+bool IsToken(std::string_view s) {
+  if (s.empty()) {
+    return false;
+  }
+  for (const char c : s) {
+    if (!IsTokenChar(static_cast<unsigned char>(c))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief True if @p s contains a control character (a field-injection risk).
+ *
+ * Control bytes 0x00-0x1F (except HT) and DEL (0x7F) must not appear in a
+ * request-line or header field -- a bare CR/LF or NUL there is a header-
+ * injection / smuggling vector.
+ */
+bool HasCtl(std::string_view s) {
+  for (const char c : s) {
+    const auto u = static_cast<unsigned char>(c);
+    if ((u < 0x20 && u != '\t') || u == 0x7F) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** @brief Remove leading and trailing spaces and tabs. */
 std::string_view TrimOws(std::string_view s) {
   std::size_t b = 0;
@@ -126,6 +172,16 @@ bool HttpRequestParser::parse_head(std::string_view block) {
     error_ = "empty method or target";
     return false;
   }
+  // The method must be a token and the target must be free of control bytes
+  // (a bare CR/LF/NUL there is an injection/smuggling vector).
+  if (!IsToken(request_.method)) {
+    error_ = "invalid method";
+    return false;
+  }
+  if (HasCtl(request_.target)) {
+    error_ = "control character in target";
+    return false;
+  }
 
   // Split target into path and query.
   const std::size_t q = request_.target.find('?');
@@ -149,15 +205,27 @@ bool HttpRequestParser::parse_head(std::string_view block) {
     if (line.empty()) {
       continue;
     }
+    // Reject obsolete line folding (a continuation line beginning with SP/HT):
+    // it is deprecated by RFC 7230 and a request-smuggling desync vector.
+    if (line[0] == ' ' || line[0] == '\t') {
+      error_ = "obsolete header line folding";
+      return false;
+    }
     const std::size_t colon = line.find(':');
     if (colon == std::string_view::npos) {
       error_ = "malformed header line";
       return false;
     }
-    std::string_view name = TrimOws(line.substr(0, colon));
+    // The name must be a token (no whitespace before the colon, no controls);
+    // the value must contain no control characters.
+    std::string_view name = line.substr(0, colon);
     std::string_view value = TrimOws(line.substr(colon + 1));
-    if (name.empty()) {
-      error_ = "empty header name";
+    if (!IsToken(name)) {
+      error_ = "invalid header name";
+      return false;
+    }
+    if (HasCtl(value)) {
+      error_ = "control character in header value";
       return false;
     }
     request_.headers.push_back(
