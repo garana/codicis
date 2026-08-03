@@ -102,6 +102,71 @@ Configuration comes from a config file and/or CLI flags; CLI flags take
 precedence and share the same names as file keys (e.g. `net.http_port`). See
 `config/codicis.example.conf`. (Config subsystem lands in phase P1.)
 
+## Authentication and authorization
+
+codicis separates **authorization** (does this user own this order?) from
+**authentication** (is the request really from that user?). Authorization is
+always enforced in-process: every order is assigned an opaque external UUID
+handle owned by a user UUID, and a cancel succeeds only for the owner. The
+owner UUID is **never** taken from the request body -- it comes only from an
+authenticated source (or is anonymous when authentication is disabled).
+
+Authentication is a configurable layer, because two reasonable operating
+principles pull in opposite directions:
+
+1. **Block unexpected traffic as early as possible**, so it never reaches the
+   app/network layers. This favors trusting an authenticating edge proxy.
+   - Pro: least work in codicis, one choke point, keeps crypto off the
+     matching path (which pairs with offloading TLS to the edge).
+   - Con: relies on the network boundary being trustworthy; a misconfigured
+     bind is a full bypass (i.e. higher cross-layer trust).
+2. **Reduce cross-layer trust**, by having codicis verify identity itself.
+   - Pro: does not trust the edge; supports revocation via a token store.
+   - Con: puts validation (often cryptographic) near the process, needing a
+     helper pool + cache to keep the matching path free.
+
+Two mechanisms implement these, and they are **not exclusive** -- an integrator
+can enable both at once for defense in depth:
+
+- **Option A (trusted header).** An authenticating edge validates the caller
+  and forwards the user UUID in a header (e.g. `X-User-Id`); codicis trusts it.
+- **Option B (auth helper).** codicis forwards a credential header (e.g.
+  `Authorization`) to a pool of auth helper child processes, which validate it
+  and return the user UUID (with an optional `not_after` expiry). Results are
+  cached (positive + negative), and concurrent lookups of the same credential
+  are coalesced into one helper request.
+
+When **both** are enabled, a request must pass both and they must resolve to
+the **same** UUID, otherwise it is rejected (403). A missing or malformed
+identity is 401; a failed or mismatched validation is 403. `GET /health` and
+`GET /book` require no identity. Over WebSocket, identity is resolved once from
+the handshake headers and applies to every order on that connection.
+
+Configuration keys (all under `auth.`; CLI/file share names):
+
+| Key                               | Purpose                                |
+| --------------------------------- | -------------------------------------- |
+| `auth.header.enabled`             | Enable Option A (trusted header)       |
+| `auth.header.name`                | Header carrying the user UUID          |
+| `auth.helper.enabled`             | Enable Option B (auth helper pool)     |
+| `auth.helper.cmd`                 | Command to launch each auth helper     |
+| `auth.helper.concurrency`         | Number of helper processes (pool size) |
+| `auth.helper.pipelining`          | Helper accepts overlapping requests    |
+| `auth.helper.pipeline_depth`      | Max in-flight per helper (1 if not)    |
+| `auth.helper.credential_header`   | Header value forwarded to the helper   |
+| `auth.helper.request_timeout_ms`  | Per-request helper timeout             |
+| `auth.cache.max_entries`          | Positive cache capacity                |
+| `auth.cache.ttl_ms`               | Positive entry lifetime cap            |
+| `auth.cache.negative_max_entries` | Negative cache capacity                |
+| `auth.cache.negative_ttl_ms`      | Negative entry lifetime                |
+
+Recommended values: leave both mechanisms off by default (anonymous). Set
+`concurrency` near the number of CPU cores when the helper does crypto; set
+`pipeline_depth` to about 8 when the helper pipelines, else 1. A positive entry
+lives until the helper's `not_after`, capped by `ttl_ms` (30-120 s is typical);
+keep `negative_ttl_ms` short (a few seconds) so a revoked or mistyped
+credential clears quickly.
+
 ## Repository layout
 
 ```

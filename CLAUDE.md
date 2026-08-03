@@ -92,8 +92,9 @@ Key design decisions:
 - IPC is a generic helper framework so more helper types (trade reporter,
   last-known-price reporter, ...) can be added later. Pipelining is required.
 
-The full master plan lives at
-`~/.claude/plans/hashed-seeking-manatee.md`.
+This file (Progress + To Design) is the durable project record. The plan file
+`~/.claude/plans/hashed-seeking-manatee.md` holds only the current active plan
+(it no longer carries the whole-project master plan).
 
 ## Order types (approved scope, phased)
 
@@ -398,8 +399,32 @@ Linux (CI/container) during hardening.
             `GET /book?symbol=` is per-symbol, and market-data subscriptions are
             per-symbol (`action=subscribe&symbol=`) with per-symbol broadcast.
             Tests updated; verified live with independent BTC/ETH books.
-      - [ ] External UUIDs (uuid<->id map), a sequence-numbered book-event
-            stream, then the feed-helper building L1/L2/L3. Build in that order.
+      - [x] External UUIDs (uuid<->id map): every order gets an opaque uuidv4
+            handle (returned to the client), mapped in the TradingEngine to its
+            internal (symbol, id); handles are pruned on cancel and on maker
+            fill. Each order has an owner (a user uuid); cancel is authorized
+            only for the owner (kOk/kNotFound/kForbidden). NB: an earlier commit
+            (a4a2d95) briefly took the owner from a client `user` form field;
+            that field was REMOVED -- identity now comes only from auth (below).
+      - [ ] A sequence-numbered book-event stream, then the feed-helper building
+            L1/L2/L3. Build in that order.
+- [~] Authentication + authorization layer:
+      - [x] Owner authorization enforced in the engine (owner uuid vs cancel
+            requester); order handles are external uuids (see above).
+      - [x] Configurable request authentication (`auth.*`), two non-exclusive
+            mechanisms: Option A trusts a user-uuid header from an
+            authenticating edge; Option B forwards a credential header to a pool
+            of auth helper child processes (concurrency + pipelining depth) that
+            resolve it to a uuid. Positive/negative TokenCache (approximate
+            weighted-LRU on an intrusive list; positive entries expire at the
+            helper's `not_after`), single-flight coalescing per credential, and
+            a WallClock for absolute expiry. Both enabled => must pass and agree
+            (403 on mismatch); 401 on missing/invalid, anonymous when disabled.
+            WS identity is resolved once at the handshake. Reference
+            `codicis_auth_helper`. Covered by test_token_cache, test_auth, and
+            auth cases in test_app; verified live.
+      - [ ] JWT/PASETO verification at the edge, mTLS, or HMAC request signing
+            as alternative/stronger authentication front-ends (see To Design).
 - [ ] H2 Hardening (robustness): parser fuzzing, bounded outbox + backpressure,
       Linux/epoll validation, load tests. (H1 TLS is dropped -- TLS is
       offloaded to an edge proxy; see To Design.)
