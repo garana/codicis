@@ -30,6 +30,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "codicis/core/matching_engine.h"
 #include "codicis/core/order.h"
@@ -107,6 +108,23 @@ class TradingEngine {
                       const std::string& requester,
                       Symbol* symbol_out = nullptr);
 
+  /** @brief Callback delivering the executions from a session auction. */
+  using AuctionCallback = std::function<void(const std::vector<Trade>&)>;
+
+  /**
+   * @brief Run a symbol's opening or closing uniform-price auction.
+   *
+   * Crosses the queued auction orders at a single clearing price, reports the
+   * resulting trades and per-account fills to storage (best-effort, like a
+   * continuous match), and delivers the executions. The queued orders were
+   * already persisted when submitted, so nothing else is needed for durability.
+   * @param symbol  The instrument.
+   * @param opening True for the opening auction, false for the closing one.
+   * @param cb      Receives the auction executions (invoked synchronously).
+   */
+  void run_auction(const Symbol& symbol, bool opening,
+                   const AuctionCallback& cb);
+
   /**
    * @brief Ask storage to commit; committed entries leave the processed queue.
    */
@@ -167,6 +185,9 @@ class TradingEngine {
   /** @brief Report an order's resulting trades and fills to storage. */
   void report_results(const Symbol& symbol, const Order& taker,
                       const SubmitOutcome& out);
+
+  /** @brief Report a batch of auction trades and per-order fills to storage. */
+  void report_auction(const Symbol& symbol, const std::vector<Trade>& trades);
 
   /** @brief Drop handles for makers removed by a match. */
   void prune_filled(const Symbol& symbol, const SubmitOutcome& out);

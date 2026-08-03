@@ -235,4 +235,49 @@ void TradingEngine::report_results(const Symbol& symbol, const Order& taker,
   }
 }
 
+void TradingEngine::run_auction(const Symbol& symbol, bool opening,
+                                const AuctionCallback& cb) {
+  std::vector<Trade> trades = opening
+                                  ? matching_.run_opening_auction(symbol)
+                                  : matching_.run_closing_auction(symbol);
+  report_auction(symbol, trades);
+  if (cb) {
+    cb(trades);
+  }
+}
+
+void TradingEngine::report_auction(const Symbol& symbol,
+                                   const std::vector<Trade>& trades) {
+  auto on_report = [this](bool ok) {
+    if (!ok) {
+      ++report_failures_;
+      LogMessage(LogLevel::kError, "storage failed to record an auction trade");
+    }
+  };
+
+  // Each execution is a trade carrying both order ids; storage attributes it to
+  // both accounts' positions via the per-order fill reports below.
+  std::map<OrderId, Quantity> filled;  // per-order executed qty (both sides)
+  for (const Trade& t : trades) {
+    storage_.report_trade({{"symbol", symbol},
+                           {"taker", std::to_string(t.taker_id)},
+                           {"maker", std::to_string(t.maker_id)},
+                           {"price", std::to_string(t.price)},
+                           {"qty", std::to_string(t.qty)}},
+                          on_report);
+    filled[t.taker_id] += t.qty;
+    filled[t.maker_id] += t.qty;
+  }
+  for (const auto& [id, qty] : filled) {
+    const Order* o = matching_.find(symbol, id);
+    const Quantity remaining = o != nullptr ? o->leaves : 0;
+    storage_.report_fill({{"symbol", symbol},
+                          {"id", std::to_string(id)},
+                          {"qty", std::to_string(qty)},
+                          {"remaining", std::to_string(remaining)},
+                          {"status", o == nullptr ? "filled" : "partial"}},
+                         on_report);
+  }
+}
+
 }  // namespace codicis

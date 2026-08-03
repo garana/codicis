@@ -75,6 +75,9 @@ class AppServer : public TimerHandler {
   void handle_cancel(const HttpRequest& req, const HttpResponder& respond);
   void handle_book(const HttpRequest& req, HttpResponse& resp);
 
+  /** @brief Run a symbol's opening/closing auction and report the prints. */
+  void handle_auction(const HttpRequest& req, HttpResponse& resp);
+
   /** @brief Submit an order received over a WebSocket and stream the result. */
   void handle_ws_message(WsConnection& conn, bool is_binary,
                          std::string_view payload);

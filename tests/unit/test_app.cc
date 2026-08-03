@@ -435,3 +435,54 @@ TEST_CASE("HTTP header + helper auth must agree", "[app][auth]") {
     REQUIRE(r.rfind("HTTP/1.1 403", 0) == 0);
   }
 }
+
+TEST_CASE("REST session auction crosses queued orders", "[app][auction]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string storage = StorageFlag();
+  std::vector<const char*> argv = {"codicis", "--net.http_port=0",
+                                   "--net.ws_port=0", storage.c_str()};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t port = server.http_port();
+
+  // Queue a limit-on-open buy and sell at the same price -- they must NOT
+  // trade continuously, only in the auction.
+  const std::string b = RoundTrip(
+      loop, port,
+      Post("/orders",
+           "symbol=BTC&side=buy&type=limit&price=100&qty=10&auction=loo"));
+  REQUIRE(b.find("\"accepted\":true") != std::string::npos);
+  REQUIRE(b.find("\"rested\":false") != std::string::npos);  // queued, not resting
+
+  const std::string s = RoundTrip(
+      loop, port,
+      Post("/orders",
+           "symbol=BTC&side=sell&type=limit&price=100&qty=10&auction=loo"));
+  REQUIRE(s.find("\"accepted\":true") != std::string::npos);
+
+  // No continuous trade happened; the book top is empty.
+  const std::string book = RoundTrip(
+      loop, port,
+      "GET /book?symbol=BTC HTTP/1.1\r\nConnection: close\r\n\r\n");
+  REQUIRE(book.find("\"bid\":null") != std::string::npos);
+
+  // Running the opening auction crosses them at the uniform price 100.
+  const std::string a =
+      RoundTrip(loop, port, Post("/auction", "symbol=BTC&phase=open"));
+  REQUIRE(a.rfind("HTTP/1.1 200", 0) == 0);
+  REQUIRE(a.find("\"phase\":\"open\"") != std::string::npos);
+  REQUIRE(a.find("\"price\":100,\"qty\":10") != std::string::npos);
+
+  // A bad phase is rejected.
+  const std::string bad =
+      RoundTrip(loop, port, Post("/auction", "symbol=BTC&phase=lunch"));
+  REQUIRE(bad.rfind("HTTP/1.1 400", 0) == 0);
+}

@@ -193,6 +193,24 @@ bool ParseOrderForm(
       return false;
     }
   }
+  // Optional session-auction designation (queues the order for the open/close
+  // cross rather than continuous trading).
+  if (const std::string* a = FormGet(form, "auction")) {
+    if (*a == "moo") {
+      SetFlag(&order.flags, OrderFlag::kMoo);
+    } else if (*a == "loo") {
+      SetFlag(&order.flags, OrderFlag::kLoo);
+    } else if (*a == "moc") {
+      SetFlag(&order.flags, OrderFlag::kMoc);
+    } else if (*a == "loc") {
+      SetFlag(&order.flags, OrderFlag::kLoc);
+    } else if (*a == "opg") {
+      SetFlag(&order.flags, OrderFlag::kOpg);
+    } else {
+      *err = "invalid auction (moo|loo|moc|loc|opg)";
+      return false;
+    }
+  }
   *symbol = *symbol_s;
   *out = order;
   return true;
@@ -397,6 +415,12 @@ void AppServer::setup_routes() {
                     });
   router_.add("GET", "/book", [this](const HttpRequest& r, HttpResponse& p) {
     handle_book(r, p);
+  });
+  // Operational endpoint: run a symbol's session auction. Intended for an
+  // operator/scheduler, not end users -- restrict it at the edge.
+  router_.add("POST", "/auction", [this](const HttpRequest& r,
+                                         HttpResponse& p) {
+    handle_auction(r, p);
   });
 }
 
@@ -608,6 +632,42 @@ void AppServer::handle_book(const HttpRequest& req, HttpResponse& resp) {
   resp.set_status(200);
   resp.set_header("Content-Type", "application/json");
   resp.body = "{" + BookTopFields(matching_, *sym) + "}";
+}
+
+void AppServer::handle_auction(const HttpRequest& req, HttpResponse& resp) {
+  const auto form = ParseForm(req.body);
+  const std::string* sym = FormGet(form, "symbol");
+  const std::string* phase = FormGet(form, "phase");
+  if (sym == nullptr || sym->empty()) {
+    return JsonError(resp, 400, "missing symbol");
+  }
+  if (phase == nullptr || (*phase != "open" && *phase != "close")) {
+    return JsonError(resp, 400, "phase must be 'open' or 'close'");
+  }
+  const Symbol symbol = *sym;
+  const bool opening = *phase == "open";
+
+  // The cross runs synchronously; storage reporting is fired best-effort.
+  std::vector<Trade> result;
+  engine_->run_auction(symbol, opening,
+                       [&](const std::vector<Trade>& t) { result = t; });
+
+  std::ostringstream body;
+  body << "{\"phase\":\"" << *phase << "\",\"symbol\":\"" << symbol
+       << "\",\"trades\":[";
+  for (std::size_t i = 0; i < result.size(); ++i) {
+    const Trade& t = result[i];
+    if (i != 0) {
+      body << ",";
+    }
+    body << "{\"price\":" << t.price << ",\"qty\":" << t.qty
+         << ",\"taker\":" << t.taker_id << ",\"maker\":" << t.maker_id << "}";
+  }
+  body << "]}";
+  resp.set_status(200);
+  resp.set_header("Content-Type", "application/json");
+  resp.body = body.str();
+  broadcast_market_data(symbol, result);  // top of book + prints changed
 }
 
 void AppServer::broadcast_market_data(const Symbol& symbol,
