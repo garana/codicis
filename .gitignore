@@ -14,3 +14,10 @@ compile_commands.json
 # CMake local
 CMakeCache.txt
 CMakeFiles/
+
+# Tooling caches (clangd index, etc.) -- machine-specific, regenerated
+.cache/
+
+# Claude Code local settings. NOTE: .claude/skills/ is intentionally tracked
+# (the project's build/test/tidy skills); only the local settings are ignored.
+.claude/settings.local.json
