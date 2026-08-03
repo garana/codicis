@@ -454,14 +454,14 @@ Linux (CI/container) during hardening.
             then price, then arrival-seq priority. Unfilled LOO/LOC limit
             remainders enter continuous trading (match + rest); MOO/MOC/OPG
             remainders are discarded. Auction trades cascade stops and reprice
-            pegs. Queued orders can be cancelled before the cross. Wired into the
-            app: order submission takes an `auction=moo|loo|moc|loc|opg` field,
-            and `POST /auction` (form `symbol` + `phase=open|close`) runs the
-            cross via `TradingEngine::run_auction` (reports the prints + fills to
+            pegs. Queued orders can be cancelled before the cross. Wired into
+            the app: order submission takes an `auction=moo|loo|moc|loc|opg`
+            field, and `POST /auction` (form `symbol` + `phase=open|close`) runs
+            the cross via `TradingEngine::run_auction` (reports prints + fills to
             storage, broadcasts market data), returning the executions. NB the
             trigger is operator-driven (no automatic session clock yet); the
-            endpoint should be access-controlled at the edge. Simplification: the
-            cross is over auction-designated orders only, not merged with the
+            endpoint should be access-controlled at the edge. Simplification:
+            the cross is over auction-designated orders only, not merged with the
             resting continuous book. All six order-type CATEGORIES are now
             implemented; OT8 pull-levels-on-demand windowing is the remaining
             matching-engine work.
