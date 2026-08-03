@@ -5,7 +5,10 @@
 
 #include "codicis/ipc/storage_client.h"
 
+#include <cstddef>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace codicis {
 
@@ -71,6 +74,96 @@ void StorageClient::commit(CommitFn cb) {
       });
 }
 
+namespace {
+
+/** @brief Parse a decimal integer (optionally signed); 0 on non-digits. */
+std::int64_t ParseI64(std::string_view s) {
+  std::int64_t v = 0;
+  std::size_t i = 0;
+  bool neg = false;
+  if (!s.empty() && (s[0] == '-' || s[0] == '+')) {
+    neg = s[0] == '-';
+    i = 1;
+  }
+  for (; i < s.size(); ++i) {
+    if (s[i] < '0' || s[i] > '9') {
+      break;
+    }
+    v = v * 10 + (s[i] - '0');
+  }
+  return neg ? -v : v;
+}
+
+/**
+ * @brief Parse the "orders" blob: records "id,price,leaves,seq" joined by ';'.
+ * @param blob The encoded order list.
+ * @return The decoded resting orders.
+ */
+std::vector<PulledOrder> ParseOrders(const std::string& blob) {
+  std::vector<PulledOrder> out;
+  std::size_t pos = 0;
+  while (pos < blob.size()) {
+    const std::size_t end = blob.find(';', pos);
+    const std::string_view rec(blob.data() + pos,
+                               (end == std::string::npos ? blob.size() : end) -
+                                   pos);
+    // Split rec into up to four comma-separated fields.
+    std::int64_t f[4] = {0, 0, 0, 0};
+    std::size_t fi = 0;
+    std::size_t fp = 0;
+    while (fi < 4 && fp <= rec.size()) {
+      const std::size_t fe = rec.find(',', fp);
+      const std::string_view fld(
+          rec.data() + fp, (fe == std::string_view::npos ? rec.size() : fe) - fp);
+      f[fi++] = ParseI64(fld);
+      if (fe == std::string_view::npos) {
+        break;
+      }
+      fp = fe + 1;
+    }
+    if (!rec.empty()) {
+      out.push_back(PulledOrder{static_cast<std::uint64_t>(f[0]), f[1], f[2],
+                                static_cast<std::uint64_t>(f[3])});
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    pos = end + 1;
+  }
+  return out;
+}
+
+}  // namespace
+
+void StorageClient::report_deep(const std::string& symbol,
+                                const std::string& side, std::uint64_t id,
+                                std::int64_t price, std::int64_t leaves,
+                                std::uint64_t seq, ReportFn cb) {
+  helper_.send("report_deep",
+               {{"symbol", symbol},
+                {"side", side},
+                {"id", std::to_string(id)},
+                {"price", std::to_string(price)},
+                {"leaves", std::to_string(leaves)},
+                {"seq", std::to_string(seq)}},
+               [cb = std::move(cb)](bool ok, const HelperMessage&) {
+                 if (cb) {
+                   cb(ok);
+                 }
+               });
+}
+
+void StorageClient::remove_deep(const std::string& symbol, std::uint64_t id,
+                                ReportFn cb) {
+  helper_.send("remove_deep",
+               {{"symbol", symbol}, {"id", std::to_string(id)}},
+               [cb = std::move(cb)](bool ok, const HelperMessage&) {
+                 if (cb) {
+                   cb(ok);
+                 }
+               });
+}
+
 void StorageClient::pull_levels(const std::string& symbol,
                                 const std::string& side,
                                 std::int64_t from_price, std::int64_t count,
@@ -83,8 +176,14 @@ void StorageClient::pull_levels(const std::string& symbol,
   };
   helper_.send("pull_levels", std::move(fields),
                [cb = std::move(cb)](bool ok, const HelperMessage& reply) {
+                 std::vector<PulledOrder> orders;
+                 if (ok) {
+                   if (const std::string* blob = reply.get("orders")) {
+                     orders = ParseOrders(*blob);
+                   }
+                 }
                  if (cb) {
-                   cb(ok, reply);
+                   cb(ok, std::move(orders));
                  }
                });
 }

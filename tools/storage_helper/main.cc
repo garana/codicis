@@ -16,7 +16,9 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include "codicis/ipc/helper_codec.h"
 #include "codicis/ipc/helper_message.h"
@@ -54,12 +56,27 @@ struct OrderInfo {
   std::string symbol;  /**< Instrument. */
 };
 
+/** @brief A deep (non-resident) resting order the engine can pull back. */
+struct DeepOrder {
+  std::uint64_t id = 0;
+  std::int64_t price = 0;
+  std::int64_t leaves = 0;
+  std::uint64_t seq = 0;
+};
+
 /** @brief In-memory system of record for the reference helper. */
 struct State {
   std::uint64_t highest = 0;  /**< Highest reported req_id (commit watermark). */
   std::map<std::uint64_t, OrderInfo> order_info;  /**< order id -> attribution. */
   std::map<std::pair<std::string, std::string>, std::int64_t>
       positions;  /**< (owner, symbol) -> signed net position. */
+  // Deep resting orders, keyed by (symbol, side) -> price -> FIFO by seq.
+  std::map<std::pair<std::string, std::string>,
+           std::map<std::int64_t, std::vector<DeepOrder>>>
+      deep;
+  // id -> (symbol, side, price), to locate a deep order for removal.
+  std::map<std::uint64_t, std::tuple<std::string, std::string, std::int64_t>>
+      deep_index;
 };
 
 /** @brief Write all bytes to @p fd, retrying short writes. */
@@ -133,15 +150,103 @@ HelperMessage Handle(State* st, const HelperMessage& req) {
       }
     }
     resp.set("net", std::to_string(net));
+  } else if (req.type == "report_deep") {
+    // Record a resting order that lives only in storage (deep / evicted).
+    const std::string* sym = req.get("symbol");
+    const std::string* side = req.get("side");
+    const std::string* id = req.get("id");
+    if (sym != nullptr && side != nullptr && id != nullptr) {
+      DeepOrder o;
+      o.id = static_cast<std::uint64_t>(ParseInt(*id));
+      o.price = req.get("price") != nullptr ? ParseInt(*req.get("price")) : 0;
+      o.leaves = req.get("leaves") != nullptr ? ParseInt(*req.get("leaves")) : 0;
+      o.seq = req.get("seq") != nullptr
+                  ? static_cast<std::uint64_t>(ParseInt(*req.get("seq")))
+                  : 0;
+      st->deep[{*sym, *side}][o.price].push_back(o);
+      st->deep_index[o.id] = {*sym, *side, o.price};
+    }
+    resp.type = "report_deep";
+    resp.set("status", "ok");
+  } else if (req.type == "remove_deep") {
+    const std::string* id = req.get("id");
+    if (id != nullptr) {
+      const std::uint64_t oid = static_cast<std::uint64_t>(ParseInt(*id));
+      const auto xit = st->deep_index.find(oid);
+      if (xit != st->deep_index.end()) {
+        const auto& [s, side, price] = xit->second;
+        const auto mit = st->deep.find({s, side});
+        if (mit != st->deep.end()) {
+          const auto pit = mit->second.find(price);
+          if (pit != mit->second.end()) {
+            auto& v = pit->second;
+            v.erase(std::remove_if(v.begin(), v.end(),
+                                   [oid](const DeepOrder& d) {
+                                     return d.id == oid;
+                                   }),
+                    v.end());
+            if (v.empty()) {
+              mit->second.erase(pit);
+            }
+            if (mit->second.empty()) {
+              st->deep.erase(mit);
+            }
+          }
+        }
+        st->deep_index.erase(xit);
+      }
+    }
+    resp.type = "remove_deep";
+    resp.set("status", "ok");
   } else if (req.type == "pull_levels") {
+    // Return the best deep levels beyond from_price, best-price first and, in
+    // each level, in arrival (seq) order -- a multi-record "orders" blob of
+    // "id,price,leaves,seq" tuples separated by ';'.
     resp.type = "levels";
-    if (const std::string* s = req.get("symbol")) {
-      resp.set("symbol", *s);
+    const std::string* sym = req.get("symbol");
+    const std::string* side = req.get("side");
+    const std::int64_t from_price =
+        req.get("from_price") != nullptr ? ParseInt(*req.get("from_price")) : 0;
+    const std::int64_t count =
+        req.get("count") != nullptr ? ParseInt(*req.get("count")) : 0;
+    std::string blob;
+    std::int64_t levels = 0;
+    auto emit = [&](std::vector<DeepOrder> orders) {
+      std::sort(orders.begin(), orders.end(),
+                [](const DeepOrder& a, const DeepOrder& b) {
+                  return a.seq < b.seq;  // arrival order within the level
+                });
+      for (const DeepOrder& o : orders) {
+        blob += std::to_string(o.id) + "," + std::to_string(o.price) + "," +
+                std::to_string(o.leaves) + "," + std::to_string(o.seq) + ";";
+      }
+      ++levels;
+    };
+    if (sym != nullptr && side != nullptr) {
+      const auto mit = st->deep.find({*sym, *side});
+      if (mit != st->deep.end()) {
+        const auto& prices = mit->second;  // ascending by price
+        if (*side == "buy") {  // best deep bid = highest price below the window
+          for (auto it = prices.rbegin(); it != prices.rend() && levels < count;
+               ++it) {
+            if (it->first < from_price) {
+              emit(it->second);
+            }
+          }
+        } else {  // best deep ask = lowest price above the window
+          for (auto it = prices.begin(); it != prices.end() && levels < count;
+               ++it) {
+            if (it->first > from_price) {
+              emit(it->second);
+            }
+          }
+        }
+      }
+      resp.set("symbol", *sym);
+      resp.set("side", *side);
     }
-    if (const std::string* s = req.get("side")) {
-      resp.set("side", *s);
-    }
-    resp.set("count", "0");  // this reference helper stores no deep levels
+    resp.set("orders", blob);
+    resp.set("count", std::to_string(levels));
   } else if (req.type == "ping") {
     resp.type = "pong";
   } else {

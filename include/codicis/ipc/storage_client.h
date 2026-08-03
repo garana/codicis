@@ -41,12 +41,20 @@ using ReportFn = std::function<void(bool ok)>;
  */
 using CommitFn = std::function<void(bool ok, std::uint64_t watermark)>;
 
+/** @brief One resting order returned by a deep-level pull. */
+struct PulledOrder {
+  std::uint64_t id = 0;      /**< Internal order id. */
+  std::int64_t price = 0;    /**< Resting price (ticks). */
+  std::int64_t leaves = 0;   /**< Remaining quantity. */
+  std::uint64_t seq = 0;     /**< Arrival sequence (time priority). */
+};
+
 /**
- * @brief Callback for a level pull.
- * @param ok    True if the pull succeeded.
- * @param reply The helper's response (valid when @p ok is true).
+ * @brief Callback for a deep-level pull.
+ * @param ok     True if the pull succeeded.
+ * @param orders The deep resting orders in range, best-price first then by seq.
  */
-using PullFn = std::function<void(bool ok, const HelperMessage& reply)>;
+using PullFn = std::function<void(bool ok, std::vector<PulledOrder> orders)>;
 
 /**
  * @brief Callback for a position pull.
@@ -100,12 +108,35 @@ class StorageClient {
   void commit(CommitFn cb);
 
   /**
-   * @brief Pull order-book levels not resident in memory.
+   * @brief Record a resting order that lives only in storage (deep, evicted or
+   *        priced beyond the resident window), so it can be pulled back later.
+   * @param symbol The instrument.
+   * @param side   "buy" or "sell".
+   * @param id     The internal order id.
+   * @param price  The resting price (ticks).
+   * @param leaves The remaining quantity.
+   * @param seq    The arrival sequence (time priority).
+   * @param cb     Completion callback (may be empty).
+   */
+  void report_deep(const std::string& symbol, const std::string& side,
+                   std::uint64_t id, std::int64_t price, std::int64_t leaves,
+                   std::uint64_t seq, ReportFn cb);
+
+  /**
+   * @brief Remove a deep resting order (it was cancelled or pulled resident).
+   * @param symbol The instrument.
+   * @param id     The internal order id.
+   * @param cb     Completion callback (may be empty).
+   */
+  void remove_deep(const std::string& symbol, std::uint64_t id, ReportFn cb);
+
+  /**
+   * @brief Pull the best deep levels beyond @p from_price back into memory.
    * @param symbol     The instrument symbol.
    * @param side       "buy" or "sell".
-   * @param from_price The starting price (tick units) to pull from.
-   * @param count      Number of levels to pull.
-   * @param cb         Completion callback.
+   * @param from_price The resident boundary; deeper prices are returned.
+   * @param count      Maximum number of price levels to pull.
+   * @param cb         Completion callback with the resting orders in range.
    */
   void pull_levels(const std::string& symbol, const std::string& side,
                    std::int64_t from_price, std::int64_t count, PullFn cb);

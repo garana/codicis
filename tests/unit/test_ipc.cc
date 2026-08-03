@@ -347,6 +347,81 @@ TEST_CASE("Storage helper accumulates positions and answers pull_position",
   REQUIRE(b_net == -10);  // short
   REQUIRE(c_net == 0);    // flat
 }
+
+TEST_CASE("Storage helper serves deep levels via pull_levels",
+          "[ipc][spawn][deep]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  Result<std::unique_ptr<HelperClient>> cr =
+      SpawnHelper(loop, {CODICIS_STORAGE_HELPER_PATH}, codec);
+  REQUIRE(cr.ok());
+  StorageClient storage(*cr.value());
+
+  auto pump = [&](const bool& done) {
+    for (int i = 0; i < 200 && !done; ++i) {
+      loop.run_once(5);
+    }
+  };
+
+  // Two deep bids at 100 (arrival order 1 then 2) and a deeper one at 99.
+  bool d = false;
+  storage.report_deep("BTC", "buy", 1, 100, 5, 1, nullptr);
+  storage.report_deep("BTC", "buy", 2, 100, 3, 2, nullptr);
+  storage.report_deep("BTC", "buy", 3, 99, 4, 3, [&](bool) { d = true; });
+  pump(d);
+
+  // Pull the best 2 deep bid levels below 101: level 100 (ids 1,2 in arrival
+  // order) then level 99 (id 3).
+  std::vector<PulledOrder> got;
+  bool p = false;
+  storage.pull_levels("BTC", "buy", /*from_price=*/101, /*count=*/2,
+                      [&](bool ok, std::vector<PulledOrder> o) {
+                        got = std::move(o);
+                        p = ok;
+                      });
+  pump(p);
+  REQUIRE(p);
+  REQUIRE(got.size() == 3);
+  REQUIRE(got[0].id == 1);   // best price first...
+  REQUIRE(got[0].price == 100);
+  REQUIRE(got[1].id == 2);   // ...then arrival order within the level
+  REQUIRE(got[1].seq == 2);
+  REQUIRE(got[2].id == 3);   // deeper level last
+  REQUIRE(got[2].price == 99);
+  REQUIRE(got[2].leaves == 4);
+
+  // A count of 1 returns only the best level.
+  std::vector<PulledOrder> one;
+  bool p2 = false;
+  storage.pull_levels("BTC", "buy", 101, 1,
+                      [&](bool ok, std::vector<PulledOrder> o) {
+                        one = std::move(o);
+                        p2 = ok;
+                      });
+  pump(p2);
+  REQUIRE(one.size() == 2);  // both orders at price 100
+  REQUIRE(one[0].price == 100);
+
+  // Removing id 2 drops it from the level.
+  bool r = false;
+  storage.remove_deep("BTC", 2, [&](bool) { r = true; });
+  pump(r);
+  std::vector<PulledOrder> after;
+  bool p3 = false;
+  storage.pull_levels("BTC", "buy", 101, 2,
+                      [&](bool ok, std::vector<PulledOrder> o) {
+                        after = std::move(o);
+                        p3 = ok;
+                      });
+  pump(p3);
+  REQUIRE(after.size() == 2);  // id 1 at 100, id 3 at 99
+  REQUIRE(after[0].id == 1);
+  REQUIRE(after[1].id == 3);
+}
 #endif
 
 TEST_CASE("HelperClient times out a request with no response", "[ipc][timeout]") {
