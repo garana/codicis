@@ -1247,6 +1247,7 @@ SubmitOutcome OrderBook::submit(Order order) {
     }
     out.rested = resident;
     out.rested_deep = !resident;
+    out.resting = order;
     return out;
   }
 
@@ -1293,6 +1294,7 @@ SubmitOutcome OrderBook::submit(Order order) {
       const bool resident = impl_->rest(order, &out.evicted);
       out.rested = resident;
       out.rested_deep = !resident;
+      out.resting = order;
       impl_->reprice_pegs();
       return out;
     }
@@ -1323,6 +1325,7 @@ SubmitOutcome OrderBook::submit(Order order) {
       const bool resident = impl_->rest(order, &out.evicted);
       out.rested = resident;
       out.rested_deep = !resident;
+      out.resting = order;
     }
   }
 

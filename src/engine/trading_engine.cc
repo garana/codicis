@@ -129,8 +129,13 @@ CancelResult TradingEngine::cancel(const std::string& order_uuid,
   if (symbol_out != nullptr) {
     *symbol_out = it->second.symbol;
   }
-  matching_.cancel(it->second.symbol, it->second.id);
-  id_uuid_.erase(it->second.id);
+  const Symbol symbol = it->second.symbol;
+  const OrderId id = it->second.id;
+  // Remove from memory (a no-op if the order is deep/non-resident) AND from the
+  // storage resting book (authoritative for deep orders that are not in memory).
+  matching_.cancel(symbol, id);
+  storage_.report_cancel(symbol, id, nullptr);
+  id_uuid_.erase(id);
   handles_.erase(it);
   return CancelResult::kOk;
 }
@@ -154,13 +159,18 @@ void TradingEngine::drain() {
     r.storage_ok = p.ok;
     if (p.ok) {
       r.outcome = matching_.submit(p.symbol, p.order);
-      // Register the handle only if the order rests (a fully filled or
-      // discarded order has nothing to cancel later).
-      if (r.outcome.rested) {
+      // Register a handle if the order rests -- resident OR deep (both are
+      // cancellable). A fully filled or discarded order has nothing to cancel.
+      if (r.outcome.rested || r.outcome.rested_deep) {
         handles_.emplace(
             p.order_uuid,
             Handle{.symbol = p.symbol, .id = p.order.id, .owner = p.owner});
         id_uuid_.emplace(p.order.id, p.order_uuid);
+        // Record it in the storage resting book so it can be pulled back later
+        // (and so eviction/pull-back need no further storage write).
+        const Order& ro = r.outcome.resting;
+        storage_.report_rest(p.symbol, SideName(ro.side), ro.id, ro.price,
+                             ro.leaves, ro.seq, nullptr);
       }
       report_results(p.symbol, p.order, r.outcome);
       prune_filled(p.symbol, r.outcome);

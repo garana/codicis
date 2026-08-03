@@ -53,6 +53,8 @@ struct SubmitOutcome {
   OrderId order_id = 0;         /**< The submitted order's id. */
   std::vector<Order> evicted;   /**< Resting orders pushed out of the resident
                                      window by this order (now deep). */
+  Order resting;                /**< The resting order (final price/leaves/seq),
+                                     valid when rested or rested_deep. */
 };
 
 /**
