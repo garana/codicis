@@ -126,6 +126,28 @@ class MatchingEngine {
    */
   Quantity position(const Symbol& symbol, ClientId client) const;
 
+  /**
+   * @brief Run a symbol's opening uniform-price auction.
+   * @param symbol The instrument (book created on first use).
+   * @return The auction executions.
+   */
+  std::vector<Trade> run_opening_auction(const Symbol& symbol);
+
+  /**
+   * @brief Run a symbol's closing uniform-price auction.
+   * @param symbol The instrument (book created on first use).
+   * @return The auction executions.
+   */
+  std::vector<Trade> run_closing_auction(const Symbol& symbol);
+
+  /**
+   * @brief Number of orders queued for a symbol's auction.
+   * @param symbol  The instrument.
+   * @param opening True for the opening auction, false for the closing one.
+   * @return The queued order count (0 for an unknown symbol).
+   */
+  std::size_t auction_count(const Symbol& symbol, bool opening) const;
+
   /** @return Whether a book exists for the symbol. */
   bool has_symbol(const Symbol& symbol) const {
     return books_.find(symbol) != books_.end();

@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <list>
 #include <memory_resource>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -43,6 +45,25 @@ struct Level {
   Level& operator=(Level&&) = default;
   ~Level() = default;
 };
+
+/** @brief True if @p flags select the opening auction (MOO/LOO/OPG). */
+bool IsOpeningAuction(std::uint32_t flags) {
+  return HasFlag(flags, OrderFlag::kMoo) || HasFlag(flags, OrderFlag::kLoo) ||
+         HasFlag(flags, OrderFlag::kOpg);
+}
+
+/** @brief True if @p flags select the closing auction (MOC/LOC). */
+bool IsClosingAuction(std::uint32_t flags) {
+  return HasFlag(flags, OrderFlag::kMoc) || HasFlag(flags, OrderFlag::kLoc);
+}
+
+/** @brief All auction flag bits, cleared from a remainder entering the LOB. */
+constexpr std::uint32_t kAuctionMask =
+    static_cast<std::uint32_t>(OrderFlag::kMoo) |
+    static_cast<std::uint32_t>(OrderFlag::kLoo) |
+    static_cast<std::uint32_t>(OrderFlag::kMoc) |
+    static_cast<std::uint32_t>(OrderFlag::kLoc) |
+    static_cast<std::uint32_t>(OrderFlag::kOpg);
 
 /**
  * @brief The displayed contribution of a resting order.
@@ -211,6 +232,8 @@ struct OrderBook::Impl {
   std::pmr::unordered_map<std::uint64_t, Group> groups;      // contingent groups
   std::pmr::unordered_map<OrderId, std::uint64_t> order_group;  // linked->group
   std::pmr::unordered_map<ClientId, Position> positions;  // reduce-only risk
+  std::vector<Order> opening_auction;  // MOO/LOO/OPG awaiting the open cross
+  std::vector<Order> closing_auction;  // MOC/LOC awaiting the close cross
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
   bool have_last = false;
@@ -804,6 +827,175 @@ struct OrderBook::Impl {
       }
     }
   }
+
+  /**
+   * @brief Cross a queue of auction orders at a single uniform clearing price.
+   *
+   * The clearing price maximizes executed volume; ties are broken by smallest
+   * order imbalance, then by proximity to the last trade price, then by the
+   * lower price. All eligible orders trade at that one price with market-first,
+   * then price, then arrival-sequence priority. Unfilled LOO/LOC limit
+   * remainders enter continuous trading (match + rest); MOO/MOC/OPG remainders
+   * are discarded. The queue is emptied.
+   * @param queue The auction order queue (consumed).
+   * @return The auction executions, plus any continuous cascade they trigger.
+   */
+  std::vector<Trade> cross_auction(std::vector<Order>& queue) {
+    std::vector<Trade> trades;
+    if (queue.empty()) {
+      return trades;
+    }
+
+    std::vector<Order*> buys;
+    std::vector<Order*> sells;
+    for (Order& o : queue) {
+      (o.side == Side::Buy ? buys : sells).push_back(&o);
+    }
+    auto is_market = [](const Order* o) { return o->type == OrdType::Market; };
+    auto demand_at = [&](Ticks p) {
+      Quantity d = 0;
+      for (const Order* o : buys) {
+        if (is_market(o) || o->price >= p) {
+          d += o->leaves;
+        }
+      }
+      return d;
+    };
+    auto supply_at = [&](Ticks p) {
+      Quantity s = 0;
+      for (const Order* o : sells) {
+        if (is_market(o) || o->price <= p) {
+          s += o->leaves;
+        }
+      }
+      return s;
+    };
+
+    // Candidate clearing prices are the distinct limit prices; with none (all
+    // market) fall back to the last trade price as the reference.
+    std::set<Ticks> candidates;
+    for (const Order* o : buys) {
+      if (!is_market(o)) {
+        candidates.insert(o->price);
+      }
+    }
+    for (const Order* o : sells) {
+      if (!is_market(o)) {
+        candidates.insert(o->price);
+      }
+    }
+
+    bool have_p = false;
+    Ticks pstar = 0;
+    Quantity best_v = 0;
+    Quantity best_imb = 0;
+    auto consider = [&](Ticks p) {
+      const Quantity d = demand_at(p);
+      const Quantity s = supply_at(p);
+      const Quantity v = std::min(d, s);
+      if (v <= 0) {
+        return;
+      }
+      const Quantity imb = d > s ? d - s : s - d;
+      bool better = !have_p || v > best_v || (v == best_v && imb < best_imb);
+      if (!better && v == best_v && imb == best_imb) {
+        if (have_last) {
+          const Ticks da = p > last_price ? p - last_price : last_price - p;
+          const Ticks db =
+              pstar > last_price ? pstar - last_price : last_price - pstar;
+          better = da < db;
+        } else {
+          better = p < pstar;
+        }
+      }
+      if (better) {
+        have_p = true;
+        pstar = p;
+        best_v = v;
+        best_imb = imb;
+      }
+    };
+    if (candidates.empty()) {
+      if (have_last) {
+        consider(last_price);
+      }
+    } else {
+      for (const Ticks p : candidates) {
+        consider(p);
+      }
+    }
+
+    if (have_p) {
+      // Market orders first, then buys by higher price / sells by lower price,
+      // ties by arrival sequence.
+      std::sort(buys.begin(), buys.end(), [&](const Order* a, const Order* b) {
+        if (is_market(a) != is_market(b)) return is_market(a);
+        if (a->price != b->price) return a->price > b->price;
+        return a->seq < b->seq;
+      });
+      std::sort(sells.begin(), sells.end(), [&](const Order* a, const Order* b) {
+        if (is_market(a) != is_market(b)) return is_market(a);
+        if (a->price != b->price) return a->price < b->price;
+        return a->seq < b->seq;
+      });
+      auto buy_ok = [&](const Order* o) {
+        return is_market(o) || o->price >= pstar;
+      };
+      auto sell_ok = [&](const Order* o) {
+        return is_market(o) || o->price <= pstar;
+      };
+
+      Quantity remaining = best_v;
+      std::size_t bi = 0;
+      std::size_t si = 0;
+      while (remaining > 0 && bi < buys.size() && si < sells.size()) {
+        if (!buy_ok(buys[bi]) || !sell_ok(sells[si])) {
+          break;  // sorted: once ineligible, no eligible orders remain
+        }
+        Order* b = buys[bi];
+        Order* s = sells[si];
+        const Quantity q = std::min({b->leaves, s->leaves, remaining});
+        trades.push_back(Trade{.taker_id = b->id,
+                               .maker_id = s->id,
+                               .taker_side = Side::Buy,
+                               .price = pstar,
+                               .qty = q});
+        b->leaves -= q;
+        b->filled += q;
+        s->leaves -= q;
+        s->filled += q;
+        apply_position(b->client_id, Side::Buy, q);
+        apply_position(s->client_id, Side::Sell, q);
+        remaining -= q;
+        if (b->leaves == 0) {
+          ++bi;
+        }
+        if (s->leaves == 0) {
+          ++si;
+        }
+      }
+      last_price = pstar;
+      have_last = true;
+    }
+
+    // Unfilled LOO/LOC limit remainders enter continuous trading; MOO/MOC/OPG
+    // remainders are discarded.
+    for (Order& o : queue) {
+      if (o.leaves > 0 && (HasFlag(o.flags, OrderFlag::kLoo) ||
+                           HasFlag(o.flags, OrderFlag::kLoc))) {
+        Order r = o;
+        r.flags &= ~kAuctionMask;
+        inject(r, trades);  // match against the LOB, then rest the remainder
+      }
+    }
+    queue.clear();
+
+    if (!trades.empty()) {
+      evaluate_stops(trades);
+      reprice_pegs();
+    }
+    return trades;
+  }
 };
 
 OrderBook::OrderBook() : impl_(std::make_unique<Impl>()) {}
@@ -836,6 +1028,16 @@ SubmitOutcome OrderBook::submit(Order order) {
       impl_->stops.find(order.id) != impl_->stops.end()) {
     out.accepted = false;
     out.reject_reason = "duplicate order id";
+    return out;
+  }
+
+  // Auction orders do not trade continuously: queue them until the opening or
+  // closing uniform-price cross is run at the session boundary.
+  if (IsOpeningAuction(order.flags) || IsClosingAuction(order.flags)) {
+    (IsOpeningAuction(order.flags) ? impl_->opening_auction
+                                   : impl_->closing_auction)
+        .push_back(order);
+    out.held = true;
     return out;
   }
 
@@ -1073,6 +1275,16 @@ bool OrderBook::cancel(OrderId id) {
     impl_->stops.erase(s);
     return true;
   }
+  // An order queued for an auction may be cancelled before the cross runs.
+  for (std::vector<Order>* q : {&impl_->opening_auction,
+                                &impl_->closing_auction}) {
+    const auto qit = std::find_if(q->begin(), q->end(),
+                                  [id](const Order& o) { return o.id == id; });
+    if (qit != q->end()) {
+      q->erase(qit);
+      return true;
+    }
+  }
   const auto it = impl_->orders.find(id);
   if (it == impl_->orders.end()) {
     return false;
@@ -1154,6 +1366,19 @@ void OrderBook::seed_position(ClientId client, Quantity net) {
 Quantity OrderBook::position(ClientId client) const {
   const auto it = impl_->positions.find(client);
   return it == impl_->positions.end() ? 0 : it->second.net;
+}
+
+std::vector<Trade> OrderBook::run_opening_auction() {
+  return impl_->cross_auction(impl_->opening_auction);
+}
+
+std::vector<Trade> OrderBook::run_closing_auction() {
+  return impl_->cross_auction(impl_->closing_auction);
+}
+
+std::size_t OrderBook::auction_count(bool opening) const {
+  return opening ? impl_->opening_auction.size()
+                 : impl_->closing_auction.size();
 }
 
 std::size_t OrderBook::resting_count() const { return impl_->orders.size(); }

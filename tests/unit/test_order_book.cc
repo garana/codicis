@@ -151,6 +151,53 @@ Order ReduceOnly(OrderId id, ClientId client, Side side, Ticks price,
   return o;
 }
 
+/** @brief Build a limit-on-open order. */
+Order Loo(OrderId id, Side side, Ticks price, Quantity qty) {
+  Order o = Limit(id, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kLoo);
+  return o;
+}
+
+/** @brief Build a market-on-open order. */
+Order Moo(OrderId id, Side side, Quantity qty) {
+  Order o = Market(id, side, qty);
+  SetFlag(&o.flags, OrderFlag::kMoo);
+  return o;
+}
+
+/** @brief Build a limit-on-close order. */
+Order Loc(OrderId id, Side side, Ticks price, Quantity qty) {
+  Order o = Limit(id, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kLoc);
+  return o;
+}
+
+/** @brief Build an at-the-open (OPG) limit order. */
+Order Opg(OrderId id, Side side, Ticks price, Quantity qty) {
+  Order o = Limit(id, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kOpg);
+  return o;
+}
+
+/** @return The total quantity across @p trades. */
+Quantity TotalQty(const std::vector<Trade>& trades) {
+  Quantity total = 0;
+  for (const Trade& t : trades) {
+    total += t.qty;
+  }
+  return total;
+}
+
+/** @return True if every trade in @p trades cleared at @p price. */
+bool AllAt(const std::vector<Trade>& trades, Ticks price) {
+  for (const Trade& t : trades) {
+    if (t.price != price) {
+      return false;
+    }
+  }
+  return !trades.empty();
+}
+
 }  // namespace
 
 TEST_CASE("Normalize collapses convenience TIFs", "[core][order]") {
@@ -787,4 +834,82 @@ TEST_CASE("Reduce-only buy reduces a short position", "[core][reduceonly]") {
   const SubmitOutcome out = book.submit(ReduceOnly(4, 7, Side::Buy, 101, 15));
   REQUIRE(out.accepted);
   REQUIRE(out.filled == 10);  // capped at the short -> position flat
+}
+
+// ---- OT7 auctions ---------------------------------------------------------
+
+TEST_CASE("Opening auction crosses at a single uniform price",
+          "[core][auction]") {
+  OrderBook book;
+  // Demand and supply that maximize volume at price 100 (12 lots cross).
+  REQUIRE(book.submit(Loo(1, Side::Buy, 101, 10)).held);
+  book.submit(Loo(2, Side::Buy, 100, 5));
+  book.submit(Loo(3, Side::Sell, 99, 8));
+  book.submit(Loo(4, Side::Sell, 100, 4));
+  REQUIRE(book.auction_count(/*opening=*/true) == 4);
+
+  const std::vector<Trade> trades = book.run_opening_auction();
+  REQUIRE(TotalQty(trades) == 12);   // max-volume clearing quantity
+  REQUIRE(AllAt(trades, 100));       // all at the one clearing price
+  REQUIRE(book.auction_count(true) == 0);
+
+  // The unfilled LOO buy remainder (3 of order 2) enters continuous trading.
+  Ticks bid = 0;
+  REQUIRE(book.best_bid(&bid));
+  REQUIRE(bid == 100);
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 3);
+}
+
+TEST_CASE("Market-on-open orders cross at the auction price",
+          "[core][auction]") {
+  OrderBook book;
+  book.submit(Loo(1, Side::Sell, 100, 10));  // limit sets the price
+  book.submit(Moo(2, Side::Buy, 10));        // market takes it at that price
+
+  const std::vector<Trade> trades = book.run_opening_auction();
+  REQUIRE(TotalQty(trades) == 10);
+  REQUIRE(AllAt(trades, 100));
+  REQUIRE(book.resting_count() == 0);  // both fully filled, nothing rests
+}
+
+TEST_CASE("A one-sided auction clears nothing and discards market remainders",
+          "[core][auction]") {
+  OrderBook book;
+  book.submit(Moo(1, Side::Buy, 10));  // no sellers
+  const std::vector<Trade> trades = book.run_opening_auction();
+  REQUIRE(trades.empty());
+  REQUIRE(book.auction_count(true) == 0);  // consumed
+  REQUIRE(book.resting_count() == 0);      // MOO remainder is discarded
+
+  // OPG behaves the same on its unfilled remainder (opening-only).
+  book.submit(Opg(2, Side::Buy, 100, 10));
+  REQUIRE(book.run_opening_auction().empty());
+  REQUIRE(book.resting_count() == 0);
+}
+
+TEST_CASE("Opening and closing auctions are independent", "[core][auction]") {
+  OrderBook book;
+  book.submit(Loc(1, Side::Buy, 100, 5));
+  book.submit(Loc(2, Side::Sell, 100, 5));
+  REQUIRE(book.auction_count(/*opening=*/true) == 0);
+  REQUIRE(book.auction_count(/*opening=*/false) == 2);
+
+  // Running the opening auction does not touch the closing queue.
+  REQUIRE(book.run_opening_auction().empty());
+  REQUIRE(book.auction_count(false) == 2);
+
+  const std::vector<Trade> trades = book.run_closing_auction();
+  REQUIRE(TotalQty(trades) == 5);
+  REQUIRE(AllAt(trades, 100));
+}
+
+TEST_CASE("A queued auction order can be cancelled before the cross",
+          "[core][auction]") {
+  OrderBook book;
+  book.submit(Loo(1, Side::Buy, 100, 10));
+  REQUIRE(book.auction_count(true) == 1);
+  REQUIRE(book.cancel(1));
+  REQUIRE(book.auction_count(true) == 0);
+  REQUIRE(book.run_opening_auction().empty());
+  REQUIRE_FALSE(book.cancel(1));  // already gone
 }

@@ -182,6 +182,34 @@ class OrderBook {
    */
   Quantity position(ClientId client) const;
 
+  /**
+   * @brief Run the opening uniform-price auction over queued MOO/LOO/OPG orders.
+   *
+   * Computes a single clearing price that maximizes executed volume (ties
+   * broken by smallest order imbalance, then nearest the last trade price, then
+   * lowest price) and crosses all eligible orders at that one price. Unfilled
+   * LOO limit remainders enter continuous trading; MOO market and OPG remainders
+   * are discarded. Resulting trades may cascade stops and reprice pegs.
+   * @return The auction executions (empty if nothing crosses).
+   */
+  std::vector<Trade> run_opening_auction();
+
+  /**
+   * @brief Run the closing uniform-price auction over queued MOC/LOC orders.
+   *
+   * Same uniform-price cross as the opening auction; unfilled LOC remainders
+   * enter continuous trading, MOC remainders are discarded.
+   * @return The auction executions (empty if nothing crosses).
+   */
+  std::vector<Trade> run_closing_auction();
+
+  /**
+   * @brief Number of orders queued for an auction.
+   * @param opening True for the opening auction, false for the closing one.
+   * @return The queued order count.
+   */
+  std::size_t auction_count(bool opening) const;
+
  private:
   /**
    * @brief React to fills of contingent (OCO/OTO/bracket) orders.

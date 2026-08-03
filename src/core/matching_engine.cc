@@ -85,4 +85,18 @@ Quantity MatchingEngine::position(const Symbol& symbol, ClientId client) const {
   return book == nullptr ? 0 : book->position(client);
 }
 
+std::vector<Trade> MatchingEngine::run_opening_auction(const Symbol& symbol) {
+  return book_for(symbol).run_opening_auction();
+}
+
+std::vector<Trade> MatchingEngine::run_closing_auction(const Symbol& symbol) {
+  return book_for(symbol).run_closing_auction();
+}
+
+std::size_t MatchingEngine::auction_count(const Symbol& symbol,
+                                          bool opening) const {
+  const OrderBook* book = book_of(symbol);
+  return book == nullptr ? 0 : book->auction_count(opening);
+}
+
 }  // namespace codicis

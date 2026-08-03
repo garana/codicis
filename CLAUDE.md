@@ -444,8 +444,23 @@ Linux (CI/container) during hardening.
             TODO: pull-levels-on-demand, which first needs top-of-book
             windowing (level eviction) -- currently the book holds all levels
             in memory, so there are no non-resident levels to pull.
-      - [ ] OT7 auctions (MOO/LOO/MOC/LOC/OPG): auction book + uniform-price
-            cross. Last remaining order-type family.
+      - [x] OT7 auctions (MOO/LOO/MOC/LOC/OPG): auction-flagged orders are
+            queued into a per-book opening or closing auction rather than
+            trading continuously. `run_opening_auction`/`run_closing_auction`
+            compute one uniform clearing price (max executed volume; ties
+            broken by smallest imbalance, then nearest the last trade price,
+            then lowest price; all-market falls back to the last price) and
+            cross all eligible orders at that single price with market-first,
+            then price, then arrival-seq priority. Unfilled LOO/LOC limit
+            remainders enter continuous trading (match + rest); MOO/MOC/OPG
+            remainders are discarded. Auction trades cascade stops and reprice
+            pegs. Queued orders can be cancelled before the cross. Core-only:
+            the app must call the run_*_auction methods at session boundaries
+            (not yet wired to a session clock/endpoint). Simplification: the
+            cross is over auction-designated orders only, not merged with the
+            resting continuous book. All six order-type CATEGORIES are now
+            implemented; OT8 pull-levels-on-demand windowing is the remaining
+            matching-engine work.
 - [~] Multi-symbol + market-data architecture (decided; see To Design):
       - [x] Per-symbol book registry: `MatchingEngine` (src/core) owns one
             OrderBook per Symbol, created on first use, routing submit/cancel/
