@@ -444,11 +444,11 @@ Linux (CI/container) during hardening.
             OT8 pull-levels-on-demand windowing is in progress (3 phases):
             - [x] Phase 1: the storage helper holds the full continuous resting
                   book, reported when an order rests (report_rest), decremented
-                  by report_fill, removed by report_cancel; pull_levels returns a
-                  multi-record order list (best-price first, arrival/seq order
-                  within a level) for the deep slice beyond the caller's resident
-                  boundary. Eviction/pull-back write nothing -- the order is
-                  already stored.
+                  by report_fill, removed by report_cancel; pull_levels
+                  returns a multi-record order list (best-price first,
+                  arrival/seq order within a level) for the deep slice beyond
+                  the caller's resident boundary. Eviction/pull-back write
+                  nothing -- the order is already stored.
             - [x] Phase 2: the OrderBook is a bounded resident cache
                   (`OrderBook(stp, mem_levels)`, MatchingEngine passes it). An
                   order that would open a level worse than the window's far edge
@@ -456,11 +456,12 @@ Linux (CI/container) during hardening.
                   materialized); a better order evicts the worst resident level
                   (SubmitOutcome.evicted). has_deep / deep_boundary /
                   worst_resident accessors + insert_resident (pull-back
-                  primitive). mem_levels defaults to 0 (unbounded) and is NOT yet
-                  wired into AppServer -- production stays unbounded until Phase 3
-                  adds the engine cooperation.
-            - [ ] Phase 3: async pull-back in the engine (ensure_depth pulls deep
-                  contra levels before an aggressor reaches them; park/resume;
+                  primitive). mem_levels defaults to 0 (unbounded) and is not
+                  yet wired into AppServer -- production stays unbounded until
+                  Phase 3 adds the engine cooperation.
+            - [ ] Phase 3: async pull-back in the engine (ensure_depth pulls
+                  deep contra levels before an aggressor reaches them;
+                  park/resume;
                   cold-start warmup pulls top-N per side; deep-order cancel via
                   report_cancel; separate reader HelperClient; report_rest on
                   rest; wire mem_levels into AppServer).
