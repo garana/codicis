@@ -25,6 +25,9 @@ OptionRegistry BuildOptionRegistry() {
                     "How often to ask the storage helper to commit");
   reg.add_int_range("storage.request_timeout_ms", 5000, 0, 3'600'000,
                     "Per-request storage helper timeout in ms (0 disables)");
+  reg.add_int_range("storage.processed_queue_max", 10000, 0, 100'000'000,
+                    "Max un-committed reports before new orders get 503 "
+                    "backpressure (0 disables)");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
 

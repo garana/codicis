@@ -305,6 +305,8 @@ Status AppServer::start() {
   helper_ = std::move(hr.value());
   storage_ = std::make_unique<StorageClient>(*helper_);
   engine_ = std::make_unique<TradingEngine>(matching_, *storage_, mem_levels_);
+  outbox_max_ = static_cast<std::size_t>(
+      config_.get_int("storage.processed_queue_max").value());
 
   // Authentication: Option A (trusted header) and/or Option B (helper pool).
   auth_header_enabled_ = config_.get_bool("auth.header.enabled").value();
@@ -430,6 +432,16 @@ void AppServer::setup_routes() {
 
 void AppServer::handle_submit(const HttpRequest& req,
                               const HttpResponder& respond) {
+  // Backpressure: if the storage processed-queue (un-committed reports) is
+  // full, shed new orders with 503 rather than growing memory without bound.
+  if (outbox_max_ > 0 && storage_->processed_pending() >= outbox_max_) {
+    HttpResponse resp;
+    resp.set_header("Retry-After", "1");
+    JsonError(resp, 503, "storage backpressure: retry");
+    respond(std::move(resp));
+    return;
+  }
+
   // Parse the request synchronously (the request is not valid after we return).
   Symbol symbol;
   Order order;  // the engine assigns the id
@@ -505,6 +517,11 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
   std::string err;
   if (!ParseOrderForm(form, &symbol, &order, &err)) {
     conn.send_text(JsonErrorBody(err));
+    return;
+  }
+  // Backpressure: shed new orders when the storage processed-queue is full.
+  if (outbox_max_ > 0 && storage_->processed_pending() >= outbox_max_) {
+    conn.send_text(JsonErrorBody("storage backpressure: retry"));
     return;
   }
   // Identity is per-connection, resolved once at the handshake (Option A/B) or

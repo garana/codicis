@@ -120,6 +120,7 @@ class AppServer : public TimerHandler {
   const Config& config_;
 
   std::size_t mem_levels_ = 0;  // resident-window bound (0 = unbounded)
+  std::size_t outbox_max_ = 0;  // un-committed reports before 503 (0=unbounded)
   MatchingEngine matching_;
   HttpRouter router_;
   std::unique_ptr<HelperCodec> codec_;
