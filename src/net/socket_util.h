@@ -37,6 +37,26 @@ inline Status SetNonBlocking(int fd) {
 }
 
 /**
+ * @brief Mark a descriptor close-on-exec.
+ *
+ * Listening and accepted sockets must not leak into helper subprocesses that
+ * the server fork()/exec()s (see ipc/helper_client): a leaked client socket
+ * keeps the peer connection from fully closing, and a leaked listen socket
+ * holds the port. epoll/kqueue and helper pipes are already CLOEXEC; sockets
+ * were not.
+ * @param fd The descriptor.
+ * @return Ok, or an Error on failure.
+ */
+inline Status SetCloexec(int fd) {
+  const int flags = ::fcntl(fd, F_GETFD, 0);
+  if (flags < 0 || ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+    return Status(MakeError(ErrorCode::kIo,
+                            std::string("fcntl: ") + std::strerror(errno)));
+  }
+  return Status::Ok();
+}
+
+/**
  * @brief Create a non-blocking IPv4 listening socket bound to addr:port.
  * @param addr      Dotted IPv4 address to bind (e.g. "127.0.0.1").
  * @param port      Port to bind; 0 selects an ephemeral port.
@@ -53,6 +73,10 @@ inline Status CreateListenSocket(const std::string& addr, std::uint16_t port,
   }
   const int one = 1;
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  if (Status s = SetCloexec(fd); !s.ok()) {
+    ::close(fd);
+    return s;
+  }
 
   struct sockaddr_in sa;
   std::memset(&sa, 0, sizeof(sa));

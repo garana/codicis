@@ -56,6 +56,12 @@ void TcpListener::on_io_ready(int /*fd*/, IoEvents /*events*/) {
       ::close(conn);
       continue;
     }
+    // Accepted sockets inherit no CLOEXEC from the listener, so set it here to
+    // keep client connections out of fork()/exec()d helper subprocesses.
+    if (Status s = net_internal::SetCloexec(conn); !s.ok()) {
+      ::close(conn);
+      continue;
+    }
     on_accept_(conn);
   }
 }
