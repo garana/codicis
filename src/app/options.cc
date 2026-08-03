@@ -53,10 +53,14 @@ OptionRegistry BuildOptionRegistry() {
                     "Per-request auth helper timeout in ms (0 disables)");
   reg.add_int_range("auth.cache.max_entries", 4096, 0, 100'000'000,
                     "Positive auth cache capacity (validated credentials)");
+  reg.add_int_range("auth.cache.max_bytes", 0, 0, 1'000'000'000'000,
+                    "Positive auth cache byte budget, key+value (0 = no limit)");
   reg.add_int_range("auth.cache.ttl_ms", 60'000, 0, 3'600'000,
                     "Positive auth cache entry lifetime in ms");
   reg.add_int_range("auth.cache.negative_max_entries", 1024, 0, 100'000'000,
                     "Negative auth cache capacity (rejected credentials)");
+  reg.add_int_range("auth.cache.negative_max_bytes", 0, 0, 1'000'000'000'000,
+                    "Negative auth cache byte budget, key+value (0 = no limit)");
   reg.add_int_range("auth.cache.negative_ttl_ms", 5000, 0, 3'600'000,
                     "Negative auth cache entry lifetime in ms (keep short)");
   return reg;

@@ -7,8 +7,16 @@
 
 namespace codicis {
 
-TokenCache::TokenCache(const Clock& clock, std::size_t capacity)
-    : clock_(clock), capacity_(capacity) {}
+namespace {
+/** @brief Payload bytes charged for an entry: key + value sizes. */
+std::size_t EntryBytes(const std::string& key, const std::string& value) {
+  return key.size() + value.size();
+}
+}  // namespace
+
+TokenCache::TokenCache(const Clock& clock, std::size_t capacity,
+                       std::size_t max_bytes)
+    : clock_(clock), capacity_(capacity), max_bytes_(max_bytes) {}
 
 TokenCache::~TokenCache() = default;
 
@@ -39,6 +47,7 @@ void TokenCache::push_tail(Node* n) {
 }
 
 void TokenCache::erase(Node* n) {
+  bytes_ -= EntryBytes(n->key, n->value);
   unlink(n);
   index_.erase(n->key);  // frees the Node (owned by the index)
 }
@@ -48,29 +57,38 @@ void TokenCache::insert(const std::string& key, const std::string& value,
   if (capacity_ == 0 || expiry_ns <= clock_.now()) {
     return;  // caching disabled, or the entry is already expired
   }
-  const Nanos expiry = expiry_ns;
+  const std::size_t need = EntryBytes(key, value);
 
-  // Replace an existing entry in place, refreshing value + expiry + position.
-  if (const auto it = index_.find(key); it != index_.end()) {
-    Node* n = it->second.get();
-    n->value = value;
-    n->expiry = expiry;
-    unlink(n);
-    push_tail(n);
+  // An entry larger than the whole byte budget can never fit; drop any stale
+  // copy of the key and give up rather than evicting everything for nothing.
+  if (max_bytes_ != 0 && need > max_bytes_) {
+    if (const auto it = index_.find(key); it != index_.end()) {
+      erase(it->second.get());
+    }
     return;
   }
 
-  // A new key: make room at the tail (cold end) before admitting.
-  if (index_.size() >= capacity_ && tail_ != nullptr) {
+  // Replacing an existing key: remove the old entry first, then re-admit at the
+  // tail. Keeps byte accounting exact and re-probates a refreshed credential.
+  if (const auto it = index_.find(key); it != index_.end()) {
+    erase(it->second.get());
+  }
+
+  // Evict from the tail (cold end) until the new entry fits both budgets.
+  while (tail_ != nullptr && index_.size() >= capacity_) {
+    erase(tail_);
+  }
+  while (tail_ != nullptr && max_bytes_ != 0 && bytes_ + need > max_bytes_) {
     erase(tail_);
   }
 
   auto node = std::make_unique<Node>();
   node->key = key;
   node->value = value;
-  node->expiry = expiry;
+  node->expiry = expiry_ns;
   Node* raw = node.get();
   index_.emplace(key, std::move(node));
+  bytes_ += need;
   push_tail(raw);
 }
 

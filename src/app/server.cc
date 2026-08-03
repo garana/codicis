@@ -306,10 +306,14 @@ Status AppServer::start() {
         config_.get_int("auth.helper.request_timeout_ms").value() * 1'000'000;
     ac.positive_capacity = static_cast<std::size_t>(
         config_.get_int("auth.cache.max_entries").value());
+    ac.positive_max_bytes = static_cast<std::size_t>(
+        config_.get_int("auth.cache.max_bytes").value());
     ac.positive_ttl_ns =
         config_.get_int("auth.cache.ttl_ms").value() * 1'000'000;
     ac.negative_capacity = static_cast<std::size_t>(
         config_.get_int("auth.cache.negative_max_entries").value());
+    ac.negative_max_bytes = static_cast<std::size_t>(
+        config_.get_int("auth.cache.negative_max_bytes").value());
     ac.negative_ttl_ns =
         config_.get_int("auth.cache.negative_ttl_ms").value() * 1'000'000;
     Result<std::unique_ptr<AuthClient>> ar =

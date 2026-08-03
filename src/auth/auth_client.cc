@@ -39,8 +39,8 @@ bool ParseNanos(const std::string& s, Nanos* out) {
 AuthClient::AuthClient(const Clock& clock, Config cfg)
     : clock_(clock),
       cfg_(std::move(cfg)),
-      positive_(clock, cfg_.positive_capacity),
-      negative_(clock, cfg_.negative_capacity) {}
+      positive_(clock, cfg_.positive_capacity, cfg_.positive_max_bytes),
+      negative_(clock, cfg_.negative_capacity, cfg_.negative_max_bytes) {}
 
 Result<std::unique_ptr<AuthClient>> AuthClient::Create(EventLoop& loop,
                                                        const Clock& clock,

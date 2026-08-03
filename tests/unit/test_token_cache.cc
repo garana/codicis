@@ -82,6 +82,32 @@ TEST_CASE("TokenCache read promotes an entry away from eviction",
   REQUIRE(cache.lookup("k4") != nullptr);
 }
 
+TEST_CASE("TokenCache enforces a byte budget", "[auth][cache]") {
+  ManualClock clock(0);
+  // Generous entry cap; the byte budget is the binding constraint. Each entry
+  // below is key(2) + value(3) = 5 bytes, so a 12-byte budget holds two.
+  TokenCache cache(clock, /*capacity=*/100, /*max_bytes=*/12);
+
+  cache.insert("k1", "aaa", kFar);  // [k1]
+  cache.insert("k2", "bbb", kFar);  // [k1(head), k2(tail)]
+  REQUIRE(cache.size() == 2);
+  REQUIRE(cache.bytes() == 10);
+
+  cache.insert("k3", "ccc", kFar);  // 10+5 > 12: evict the tail (k2) to fit
+  REQUIRE(cache.size() == 2);
+  REQUIRE(cache.bytes() == 10);
+  REQUIRE(cache.lookup("k2") == nullptr);  // tail (cold end) evicted
+  REQUIRE(cache.lookup("k1") != nullptr);  // head survived
+  REQUIRE(cache.lookup("k3") != nullptr);
+
+  // An entry larger than the whole budget is never cached.
+  cache.insert("big", std::string(100, 'x'), kFar);
+  REQUIRE(cache.lookup("big") == nullptr);
+
+  // Eviction keeps the byte counter exact.
+  REQUIRE(cache.bytes() <= 12);
+}
+
 TEST_CASE("TokenCache with zero capacity is disabled", "[auth][cache]") {
   ManualClock clock(0);
   TokenCache cache(clock, /*capacity=*/0);

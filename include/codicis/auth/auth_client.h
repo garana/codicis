@@ -55,9 +55,11 @@ class AuthClient {
     std::size_t concurrency = 1;         /**< Helper processes to spawn. */
     std::size_t depth = 1;               /**< Max in-flight per helper. */
     Nanos request_timeout_ns = 0;        /**< Per-request timeout (0=off). */
-    std::size_t positive_capacity = 0;   /**< Positive cache size. */
+    std::size_t positive_capacity = 0;   /**< Positive cache entry cap. */
+    std::size_t positive_max_bytes = 0;  /**< Positive cache byte budget. */
     Nanos positive_ttl_ns = 0;           /**< Positive cache lifetime cap. */
-    std::size_t negative_capacity = 0;   /**< Negative cache size. */
+    std::size_t negative_capacity = 0;   /**< Negative cache entry cap. */
+    std::size_t negative_max_bytes = 0;  /**< Negative cache byte budget. */
     Nanos negative_ttl_ns = 0;           /**< Negative cache lifetime. */
   };
 

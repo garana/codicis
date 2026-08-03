@@ -155,17 +155,27 @@ Configuration keys (all under `auth.`; CLI/file share names):
 | `auth.helper.pipeline_depth`      | Max in-flight per helper (1 if not)    |
 | `auth.helper.credential_header`   | Header value forwarded to the helper   |
 | `auth.helper.request_timeout_ms`  | Per-request helper timeout             |
-| `auth.cache.max_entries`          | Positive cache capacity                |
+| `auth.cache.max_entries`          | Positive cache entry cap               |
+| `auth.cache.max_bytes`            | Positive cache byte budget (0=off)     |
 | `auth.cache.ttl_ms`               | Positive entry lifetime cap            |
-| `auth.cache.negative_max_entries` | Negative cache capacity                |
-| `auth.cache.negative_ttl_ms`      | Negative entry lifetime                |
+| `auth.cache.negative_max_entries` | Negative cache entry cap               |
+| `auth.cache.negative_max_bytes`   | Negative cache byte budget (0=off)     |
+| `auth.cache.negative_ttl_ms`      | Negative entry lifetime (max age)      |
 
 Recommended values: leave both mechanisms off by default (anonymous). Set
 `concurrency` near the number of CPU cores when the helper does crypto; set
 `pipeline_depth` to about 8 when the helper pipelines, else 1. A positive entry
-lives until the helper's `not_after`, capped by `ttl_ms` (30-120 s is typical);
-keep `negative_ttl_ms` short (a few seconds) so a revoked or mistyped
+lives until the helper's `not_after`, capped by `ttl_ms` (30-120 s is typical).
+Negative (denied) entries have no `not_after`, so `negative_ttl_ms` is their
+sole age bound -- keep it short (a few seconds) so a revoked or mistyped
 credential clears quickly.
+
+Each cache is bounded by an entry count (`max_entries`) and an optional byte
+budget over key+value sizes (`max_bytes`, 0 = no byte limit); whichever binds
+first triggers tail eviction. The positive and negative caches are separate so
+a burst of invalid credentials cannot evict validated entries. Note eviction is
+lazy on read plus these size caps -- age (TTL) bounds staleness, not memory, so
+size the caps to bound resident memory.
 
 ## Repository layout
 

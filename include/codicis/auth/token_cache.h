@@ -15,7 +15,8 @@
  *   - a read promotes its entry one step toward the HEAD (the hot end), so an
  *     entry that is read repeatedly drifts away from eviction -- its position
  *     is thus weighted by how often it is used;
- *   - when the cache is full, the entry at the TAIL is evicted.
+ *   - when the cache is over its entry-count OR byte budget, the entry at the
+ *     TAIL is evicted (repeatedly) to make room.
  *
  * Admitting new entries at the cold end means a one-off credential cannot push
  * the hot set out on a single miss: it must be read again to be protected.
@@ -40,11 +41,15 @@ class TokenCache {
  public:
   /**
    * @brief Construct a cache.
-   * @param clock    Clock read to test entry expiry (must outlive this). Use a
-   *                 wall clock when expiries are absolute wall times.
-   * @param capacity Maximum number of resident entries (0 disables the cache).
+   * @param clock     Clock read to test entry expiry (must outlive this). Use a
+   *                  wall clock when expiries are absolute wall times.
+   * @param capacity  Maximum number of resident entries (0 disables the cache).
+   * @param max_bytes Maximum total payload bytes (sum of key + value sizes)
+   *                  across resident entries; 0 means no byte budget. An entry
+   *                  larger than the whole budget is never cached.
    */
-  TokenCache(const Clock& clock, std::size_t capacity);
+  TokenCache(const Clock& clock, std::size_t capacity,
+             std::size_t max_bytes = 0);
 
   ~TokenCache();
 
@@ -79,6 +84,9 @@ class TokenCache {
   /** @return The number of resident entries. */
   std::size_t size() const { return index_.size(); }
 
+  /** @return The total payload bytes (sum of key + value sizes) resident. */
+  std::size_t bytes() const { return bytes_; }
+
  private:
   /** @brief One cache entry, linked into the intrusive LRU list. */
   struct Node {
@@ -100,10 +108,12 @@ class TokenCache {
 
   const Clock& clock_;
   const std::size_t capacity_;
+  const std::size_t max_bytes_;
 
   std::unordered_map<std::string, std::unique_ptr<Node>> index_;
   Node* head_ = nullptr;  // hot end (promoted, protected)
   Node* tail_ = nullptr;  // cold end (admission + eviction)
+  std::size_t bytes_ = 0;  // resident payload bytes (sum of key + value sizes)
 };
 
 }  // namespace codicis
