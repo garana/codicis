@@ -316,6 +316,8 @@ Status AppServer::start() {
         config_.get_int("auth.cache.negative_max_bytes").value());
     ac.negative_ttl_ns =
         config_.get_int("auth.cache.negative_ttl_ms").value() * 1'000'000;
+    ac.max_purge_per_insert = static_cast<std::size_t>(
+        config_.get_int("auth.cache.max_purge_per_insert").value());
     Result<std::unique_ptr<AuthClient>> ar =
         AuthClient::Create(loop_, auth_clock_, std::move(ac));
     if (!ar.ok()) {

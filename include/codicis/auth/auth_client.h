@@ -61,6 +61,7 @@ class AuthClient {
     std::size_t negative_capacity = 0;   /**< Negative cache entry cap. */
     std::size_t negative_max_bytes = 0;  /**< Negative cache byte budget. */
     Nanos negative_ttl_ns = 0;           /**< Negative cache lifetime. */
+    std::size_t max_purge_per_insert = 0;/**< Expired-tail purge cap/insert. */
   };
 
   /**

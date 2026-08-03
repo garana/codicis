@@ -23,6 +23,14 @@
  * TTL bounds staleness independently of position. Single-threaded; the caller
  * (the event loop) serializes access. Time is read through an injected Clock so
  * tests can drive expiry deterministically.
+ *
+ * Expiry is lazy: an entry is dropped when a lookup finds it expired, and each
+ * insert first purges expired entries at the tail (the cold end) -- so a dead
+ * entry is reclaimed before a live one is evicted to satisfy a size or byte
+ * budget. The purge stops at the first non-expired tail entry and at a
+ * configurable per-insert cap, so a single insert never walks the whole list.
+ * This is opportunistic, not a full sweep: an expired entry stranded near the
+ * hot head is only reclaimed when it is next looked up.
  */
 
 #include <cstddef>
@@ -41,15 +49,20 @@ class TokenCache {
  public:
   /**
    * @brief Construct a cache.
-   * @param clock     Clock read to test entry expiry (must outlive this). Use a
-   *                  wall clock when expiries are absolute wall times.
-   * @param capacity  Maximum number of resident entries (0 disables the cache).
-   * @param max_bytes Maximum total payload bytes (sum of key + value sizes)
-   *                  across resident entries; 0 means no byte budget. An entry
-   *                  larger than the whole budget is never cached.
+   * @param clock       Clock read to test entry expiry (must outlive this). Use
+   *                    a wall clock when expiries are absolute wall times.
+   * @param capacity    Maximum number of resident entries (0 disables the
+   *                    cache).
+   * @param max_bytes   Maximum total payload bytes (sum of key + value sizes)
+   *                    across resident entries; 0 means no byte budget. An
+   *                    entry larger than the whole budget is never cached.
+   * @param max_purge   Maximum expired entries reclaimed from the tail per
+   *                    insert; 0 means unbounded. Bounds the per-insert work of
+   *                    opportunistic purging, so one insert cannot pay to
+   *                    reclaim an entire cache of expired entries.
    */
-  TokenCache(const Clock& clock, std::size_t capacity,
-             std::size_t max_bytes = 0);
+  TokenCache(const Clock& clock, std::size_t capacity, std::size_t max_bytes = 0,
+             std::size_t max_purge = 0);
 
   ~TokenCache();
 
@@ -106,9 +119,13 @@ class TokenCache {
   /** @brief Erase @p n from both the list and the index. */
   void erase(Node* n);
 
+  /** @brief Drop expired entries from the tail (the cold end). */
+  void purge_expired_tail();
+
   const Clock& clock_;
   const std::size_t capacity_;
   const std::size_t max_bytes_;
+  const std::size_t max_purge_;
 
   std::unordered_map<std::string, std::unique_ptr<Node>> index_;
   Node* head_ = nullptr;  // hot end (promoted, protected)

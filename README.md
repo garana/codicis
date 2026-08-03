@@ -161,6 +161,7 @@ Configuration keys (all under `auth.`; CLI/file share names):
 | `auth.cache.negative_max_entries` | Negative cache entry cap               |
 | `auth.cache.negative_max_bytes`   | Negative cache byte budget (0=off)     |
 | `auth.cache.negative_ttl_ms`      | Negative entry lifetime (max age)      |
+| `auth.cache.max_purge_per_insert` | Expired-tail purge cap/insert (0=inf)  |
 
 Recommended values: leave both mechanisms off by default (anonymous). Set
 `concurrency` near the number of CPU cores when the helper does crypto; set
@@ -175,7 +176,9 @@ budget over key+value sizes (`max_bytes`, 0 = no byte limit); whichever binds
 first triggers tail eviction. The positive and negative caches are separate so
 a burst of invalid credentials cannot evict validated entries. Note eviction is
 lazy on read plus these size caps -- age (TTL) bounds staleness, not memory, so
-size the caps to bound resident memory.
+size the caps to bound resident memory. Each insert also reclaims expired
+entries from the tail, but at most `max_purge_per_insert` of them (0 =
+unbounded), so one insert never pays to sweep a whole cache of expired entries.
 
 ## Repository layout
 

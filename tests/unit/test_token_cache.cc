@@ -108,6 +108,51 @@ TEST_CASE("TokenCache enforces a byte budget", "[auth][cache]") {
   REQUIRE(cache.bytes() <= 12);
 }
 
+TEST_CASE("TokenCache insert purges expired entries from the tail",
+          "[auth][cache]") {
+  ManualClock clock(0);
+  TokenCache cache(clock, /*capacity=*/100);  // count is not the constraint
+  cache.insert("a", "1", /*expiry_ns=*/10);   // [a]
+  cache.insert("b", "2", /*expiry_ns=*/10);   // [a(head), b(tail)]
+  REQUIRE(cache.size() == 2);
+
+  clock.set(10);  // a and b are now expired (but still resident)
+
+  // A later insert reclaims the dead tail entries before admitting the new one,
+  // even though the entry-count cap was never reached.
+  cache.insert("c", "3", kFar);
+  REQUIRE(cache.size() == 1);
+  REQUIRE(cache.lookup("a") == nullptr);
+  REQUIRE(cache.lookup("b") == nullptr);
+  REQUIRE(cache.lookup("c") != nullptr);
+
+  // A live entry ahead of an expired tail is not purged past.
+  clock.set(20);
+  cache.insert("d", "4", /*expiry_ns=*/25);  // [c(head), d(tail)], c live
+  clock.set(26);                             // d expired, c still live
+  cache.insert("e", "5", kFar);              // purges d, keeps c
+  REQUIRE(cache.lookup("d") == nullptr);
+  REQUIRE(cache.lookup("c") != nullptr);
+}
+
+TEST_CASE("TokenCache caps expired-tail purging per insert", "[auth][cache]") {
+  ManualClock clock(0);
+  // Large caps so only the purge cap is exercised; reclaim <=1 expired/insert.
+  TokenCache cache(clock, /*capacity=*/100, /*max_bytes=*/0, /*max_purge=*/1);
+  cache.insert("a", "1", /*expiry_ns=*/10);  // [a]
+  cache.insert("b", "2", /*expiry_ns=*/10);  // [a, b]
+  cache.insert("c", "3", /*expiry_ns=*/10);  // [a, b, c(tail)]
+  REQUIRE(cache.size() == 3);
+
+  clock.set(10);  // a, b, c all expired
+
+  // With the cap at 1, this insert reclaims only the single tail entry (c),
+  // not the whole expired run -- so a and b remain resident and d is added.
+  cache.insert("d", "4", kFar);
+  REQUIRE(cache.size() == 3);              // 3 - 1 purged + 1 added
+  REQUIRE(cache.lookup("d") != nullptr);  // the newcomer is live
+}
+
 TEST_CASE("TokenCache with zero capacity is disabled", "[auth][cache]") {
   ManualClock clock(0);
   TokenCache cache(clock, /*capacity=*/0);

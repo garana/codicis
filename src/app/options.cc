@@ -63,6 +63,9 @@ OptionRegistry BuildOptionRegistry() {
                     "Negative auth cache byte budget, key+value (0 = no limit)");
   reg.add_int_range("auth.cache.negative_ttl_ms", 5000, 0, 3'600'000,
                     "Negative auth cache entry lifetime in ms (keep short)");
+  reg.add_int_range("auth.cache.max_purge_per_insert", 16, 0, 1'000'000,
+                    "Max expired entries reclaimed from a cache tail per insert "
+                    "(0 = unbounded)");
   return reg;
 }
 

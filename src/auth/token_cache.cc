@@ -15,8 +15,11 @@ std::size_t EntryBytes(const std::string& key, const std::string& value) {
 }  // namespace
 
 TokenCache::TokenCache(const Clock& clock, std::size_t capacity,
-                       std::size_t max_bytes)
-    : clock_(clock), capacity_(capacity), max_bytes_(max_bytes) {}
+                       std::size_t max_bytes, std::size_t max_purge)
+    : clock_(clock),
+      capacity_(capacity),
+      max_bytes_(max_bytes),
+      max_purge_(max_purge) {}
 
 TokenCache::~TokenCache() = default;
 
@@ -52,11 +55,24 @@ void TokenCache::erase(Node* n) {
   index_.erase(n->key);  // frees the Node (owned by the index)
 }
 
+void TokenCache::purge_expired_tail() {
+  const Nanos now = clock_.now();
+  std::size_t purged = 0;
+  while (tail_ != nullptr && now >= tail_->expiry) {
+    erase(tail_);  // stops at the first non-expired tail entry...
+    if (max_purge_ != 0 && ++purged >= max_purge_) {
+      break;  // ...and at the per-insert cap, bounding the work.
+    }
+  }
+}
+
 void TokenCache::insert(const std::string& key, const std::string& value,
                         Nanos expiry_ns) {
   if (capacity_ == 0 || expiry_ns <= clock_.now()) {
     return;  // caching disabled, or the entry is already expired
   }
+  // Reclaim dead entries at the cold end before evicting any live one below.
+  purge_expired_tail();
   const std::size_t need = EntryBytes(key, value);
 
   // An entry larger than the whole byte budget can never fit; drop any stale
