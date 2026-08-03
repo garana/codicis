@@ -61,6 +61,13 @@ codicis_add_test(test_token_cache
   unit/test_token_cache.cc)
 target_link_libraries(test_token_cache PRIVATE codicis_auth)
 
+codicis_add_test(test_auth
+  unit/test_auth.cc)
+target_link_libraries(test_auth PRIVATE codicis_auth)
+add_dependencies(test_auth codicis_auth_helper)
+target_compile_definitions(test_auth PRIVATE
+  CODICIS_AUTH_HELPER_PATH="$<TARGET_FILE:codicis_auth_helper>")
+
 codicis_add_test(test_engine
   unit/test_engine.cc)
 target_link_libraries(test_engine PRIVATE codicis_engine)

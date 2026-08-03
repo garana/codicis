@@ -78,6 +78,7 @@ add_subdirectory(src/core)
 add_subdirectory(src/engine)
 add_subdirectory(src/app)
 add_subdirectory(tools/storage_helper)
+add_subdirectory(tools/auth_helper)
 
 # ---- Tests -----------------------------------------------------------------
 
