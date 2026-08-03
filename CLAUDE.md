@@ -364,10 +364,19 @@ Linux (CI/container) during hardening.
             via `effective_limit()` (used in crosses/available_fill/match); the
             resting remainder shows at the plain limit. Documented
             simplification: the band is exercised only on entry, not re-applied
-            while resting (like pegs that do not auto-match). Reduce-Only is a
-            TODO (it needs
-            a position/risk layer). Core-only, like the other liquidity flags --
-            not yet exposed over REST.
+            while resting (like pegs that do not auto-match). Core-only, like the
+            other liquidity flags -- not yet exposed over REST.
+      - [x] OT4 reduce-only: the book tracks a signed net position per client id
+            (same key as STP), updated on every fill for both taker and maker.
+            A reduce-only order may only shrink an existing position: it needs an
+            account (client id != 0), a same-direction position (sell reduces a
+            long, buy a short), and is capped at the reducible quantity -- the
+            net position minus reduce-only leaves already RESTING on that side
+            (reserved on rest, released on fill/cancel/STP-cancel), so concurrent
+            reduce-only orders can never together flip the position. Wrong-side
+            or zero position rejects. The position map lives in the OrderBook
+            (per symbol); a fuller cross-symbol/margin risk layer would sit above
+            it. Core-only (not yet exposed over REST).
       - [x] OT5 pegged: Primary (same-side best), Market (opposite-side best),
             and Midpoint pegs with a signed offset and protective cap. Pegs
             rest in the ladder (matchable) but their price derives from the
@@ -401,8 +410,8 @@ Linux (CI/container) during hardening.
             TODO: pull-levels-on-demand, which first needs top-of-book
             windowing (level eviction) -- currently the book holds all levels
             in memory, so there are no non-resident levels to pull.
-      - [ ] OT4 remainder (reduce-only -- needs a position/risk layer),
-            OT7 auctions.
+      - [ ] OT7 auctions (MOO/LOO/MOC/LOC/OPG): auction book + uniform-price
+            cross. Last remaining order-type family.
 - [~] Multi-symbol + market-data architecture (decided; see To Design):
       - [x] Per-symbol book registry: `MatchingEngine` (src/core) owns one
             OrderBook per Symbol, created on first use, routing submit/cancel/

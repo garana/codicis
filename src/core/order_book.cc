@@ -190,6 +190,13 @@ struct OrderBook::Impl {
     std::vector<Order> pending_oco;   /**< Bracket TP/SL, released as OCO. */
   };
 
+  /** @brief Per-account risk state, keyed by client id, for reduce-only. */
+  struct Position {
+    Quantity net = 0;            /**< Signed net position (+long, -short). */
+    Quantity reserved_sell = 0;  /**< Resting reduce-only SELL leaves. */
+    Quantity reserved_buy = 0;   /**< Resting reduce-only BUY leaves. */
+  };
+
   // One pooled memory resource backs every node-allocating container below, so
   // steady-state submit/cancel recycles freed nodes instead of calling the
   // global allocator each time. The core is single-threaded, so the
@@ -203,6 +210,7 @@ struct OrderBook::Impl {
   std::pmr::unordered_set<OrderId> pegged;          // resting orders that reprice
   std::pmr::unordered_map<std::uint64_t, Group> groups;      // contingent groups
   std::pmr::unordered_map<OrderId, std::uint64_t> order_group;  // linked->group
+  std::pmr::unordered_map<ClientId, Position> positions;  // reduce-only risk
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
   bool have_last = false;
@@ -216,10 +224,59 @@ struct OrderBook::Impl {
         stops(&pool_),
         pegged(&pool_),
         groups(&pool_),
-        order_group(&pool_) {}
+        order_group(&pool_),
+        positions(&pool_) {}
 
   /** @return The ladder for side s. */
   Ladder& ladder(Side s) { return s == Side::Buy ? bids : asks; }
+
+  /** @return True if o is a reduce-only order. */
+  static bool is_reduce_only(const Order& o) {
+    return HasFlag(o.flags, OrderFlag::kReduceOnly);
+  }
+
+  /** @brief Apply a fill of @p q to a client's net position (skip anonymous). */
+  void apply_position(ClientId c, Side s, Quantity q) {
+    if (c == 0) {
+      return;
+    }
+    positions[c].net += (s == Side::Buy ? q : -q);
+  }
+
+  /** @return The reserved reduce-only leaves resting on side @p s. */
+  static Quantity& reserved_on(Position& p, Side s) {
+    return s == Side::Sell ? p.reserved_sell : p.reserved_buy;
+  }
+
+  /** @brief Release @p q of a resting reduce-only order's reservation. */
+  void release_reserved(const Order& o, Quantity q) {
+    if (!is_reduce_only(o) || o.client_id == 0) {
+      return;
+    }
+    const auto it = positions.find(o.client_id);
+    if (it != positions.end()) {
+      reserved_on(it->second, o.side) -= q;
+    }
+  }
+
+  /**
+   * @brief Quantity a reduce-only order may still execute for its account.
+   *
+   * A sell may only shrink a long, a buy only a short; each is bounded by the
+   * net position minus the reduce-only leaves already resting on that side, so
+   * concurrent reduce-only orders cannot together flip the position.
+   * @param o The reduce-only order.
+   * @return The reducible quantity (<= 0 means nothing to reduce).
+   */
+  Quantity reduce_only_capacity(const Order& o) {
+    const auto it = positions.find(o.client_id);
+    if (it == positions.end()) {
+      return 0;
+    }
+    const Position& p = it->second;
+    return o.side == Side::Sell ? p.net - p.reserved_sell
+                                : -p.net - p.reserved_buy;
+  }
 
   /**
    * @brief The most aggressive price @p o will take.
@@ -338,6 +395,7 @@ struct OrderBook::Impl {
           lvl.total -= me.order.leaves;
           lvl.displayed -=
               DisplayedOf(me.order.flags, me.order.leaves, me.slice);
+          release_reserved(me.order, me.order.leaves);
           it = lvl.fifo.erase(it);
           orders.erase(mid);
           pegged.erase(mid);
@@ -383,6 +441,12 @@ struct OrderBook::Impl {
       if (iceberg) {
         me.slice -= fill;
       }
+      // Update both accounts' net positions, and release the maker's reduce-
+      // only reservation as it fills (the aggressor's is released when/if its
+      // remainder rests).
+      apply_position(o.client_id, o.side, fill);
+      apply_position(me.order.client_id, me.order.side, fill);
+      release_reserved(me.order, fill);
 
       if (me.order.leaves == 0) {
         it = lvl.fifo.erase(it);
@@ -478,6 +542,12 @@ struct OrderBook::Impl {
     lvl.displayed += DisplayedOf(o.flags, o.leaves, slice);
     own.on_added(o.price);
     orders.emplace(o.id, Entry{.order = o, .pos = it, .slice = slice});
+    // A resting reduce-only order commits to reducing the position when it
+    // fills; reserve its leaves so a later reduce-only order cannot double-book
+    // the same position and flip it.
+    if (is_reduce_only(o) && o.client_id != 0) {
+      reserved_on(positions[o.client_id], o.side) += o.leaves;
+    }
   }
 
   /**
@@ -828,6 +898,28 @@ SubmitOutcome OrderBook::submit(Order order) {
     return out;
   }
 
+  // Reduce-Only: may only shrink an existing position, never open or grow one.
+  // Requires an account (client id) to attribute the position to, and is capped
+  // at the reducible quantity (net position minus reduce-only leaves already
+  // resting on this side). A wrong-side or zero position is rejected outright.
+  if (HasFlag(order.flags, OrderFlag::kReduceOnly)) {
+    if (order.client_id == 0) {
+      out.accepted = false;
+      out.reject_reason = "reduce-only requires an account";
+      return out;
+    }
+    const Quantity cap = impl_->reduce_only_capacity(order);
+    if (cap <= 0) {
+      out.accepted = false;
+      out.reject_reason = "reduce-only: no position to reduce";
+      return out;
+    }
+    if (order.leaves > cap) {
+      order.leaves = cap;  // cap the order to the reducible size
+      order.qty = cap;
+    }
+  }
+
   // All-or-none: never partially fill. If it cannot be fully filled now, an
   // immediate order (IOC/FOK/market) is rejected, while a resting (GTC/DAY)
   // AON order rests as a maker -- the matcher skips it until it can fill in
@@ -991,6 +1083,7 @@ bool OrderBook::cancel(OrderId id) {
   const Ticks price = e.order.price;
   const Quantity leaves = e.order.leaves;
   const Quantity displayed = DisplayedOf(e.order.flags, leaves, e.slice);
+  impl_->release_reserved(e.order, leaves);  // a resting reduce-only order
   Ladder& own = impl_->ladder(side);
   if (Level* lvl = own.at(price); lvl != nullptr) {
     lvl->total -= leaves;

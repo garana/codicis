@@ -136,6 +136,21 @@ Order Discretionary(OrderId id, Side side, Ticks price, Quantity qty,
   return o;
 }
 
+/** @brief Build a limit order owned by a client (for position tests). */
+Order Owned(OrderId id, ClientId client, Side side, Ticks price, Quantity qty) {
+  Order o = Limit(id, side, price, qty);
+  o.client_id = client;
+  return o;
+}
+
+/** @brief Build a reduce-only limit order owned by a client. */
+Order ReduceOnly(OrderId id, ClientId client, Side side, Ticks price,
+                 Quantity qty) {
+  Order o = Owned(id, client, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kReduceOnly);
+  return o;
+}
+
 }  // namespace
 
 TEST_CASE("Normalize collapses convenience TIFs", "[core][order]") {
@@ -696,4 +711,80 @@ TEST_CASE("Discretionary sell reaches down into the bid", "[core][discretion]") 
   REQUIRE(out.trades[0].price == 99);
   REQUIRE(out.trades[0].qty == 5);
   REQUIRE(out.filled == 5);
+}
+
+// ---- Reduce-Only ----------------------------------------------------------
+
+namespace {
+/** @brief Give @p client a long position of @p qty by buying into a sell. */
+void GoLong(OrderBook& book, ClientId client, Quantity qty) {
+  book.submit(Owned(9001, 9000, Side::Sell, 100, qty));  // resting counterparty
+  book.submit(Owned(9002, client, Side::Buy, 100, qty));  // client lifts it
+}
+}  // namespace
+
+TEST_CASE("Reduce-only without an account is rejected", "[core][reduceonly]") {
+  OrderBook book;
+  Order o = ReduceOnly(1, /*client=*/0, Side::Sell, 100, 5);
+  const SubmitOutcome out = book.submit(o);
+  REQUIRE_FALSE(out.accepted);
+  REQUIRE(out.reject_reason.find("account") != std::string::npos);
+}
+
+TEST_CASE("Reduce-only with no position is rejected", "[core][reduceonly]") {
+  OrderBook book;
+  const SubmitOutcome out = book.submit(ReduceOnly(1, 7, Side::Sell, 100, 5));
+  REQUIRE_FALSE(out.accepted);
+  REQUIRE(out.reject_reason.find("no position") != std::string::npos);
+}
+
+TEST_CASE("Reduce-only is capped to the position and cannot flip it",
+          "[core][reduceonly]") {
+  OrderBook book;
+  GoLong(book, /*client=*/7, /*qty=*/10);  // client 7 is now long 10
+
+  // A resting bid to reduce into, then an oversized reduce-only sell.
+  book.submit(Owned(3, 9000, Side::Buy, 99, 20));
+  const SubmitOutcome out = book.submit(ReduceOnly(4, 7, Side::Sell, 99, 15));
+  REQUIRE(out.accepted);
+  REQUIRE(out.filled == 10);  // capped at the long, not 15 -> position flat
+
+  // Nothing left to reduce: a further reduce-only sell is rejected.
+  const SubmitOutcome again = book.submit(ReduceOnly(5, 7, Side::Sell, 99, 5));
+  REQUIRE_FALSE(again.accepted);
+  REQUIRE(again.reject_reason.find("no position") != std::string::npos);
+}
+
+TEST_CASE("Resting reduce-only orders reserve the position", "[core][reduceonly]") {
+  OrderBook book;
+  GoLong(book, /*client=*/7, /*qty=*/10);  // long 10, book now empty
+
+  // A reduce-only sell above the market rests and reserves the whole long.
+  const SubmitOutcome first = book.submit(ReduceOnly(3, 7, Side::Sell, 105, 10));
+  REQUIRE(first.accepted);
+  REQUIRE(first.rested);
+
+  // A second reduce-only sell has no unreserved position left -> rejected,
+  // so the two resting sells can never together flip the position short.
+  const SubmitOutcome second = book.submit(ReduceOnly(4, 7, Side::Sell, 106, 10));
+  REQUIRE_FALSE(second.accepted);
+  REQUIRE(second.reject_reason.find("no position") != std::string::npos);
+
+  // Cancelling the first frees the reservation; a new reduce-only sell fits.
+  REQUIRE(book.cancel(3));
+  const SubmitOutcome third = book.submit(ReduceOnly(5, 7, Side::Sell, 105, 10));
+  REQUIRE(third.accepted);
+  REQUIRE(third.rested);
+}
+
+TEST_CASE("Reduce-only buy reduces a short position", "[core][reduceonly]") {
+  OrderBook book;
+  // Client 7 goes short 10 by selling into a resting bid.
+  book.submit(Owned(1, 9000, Side::Buy, 100, 10));
+  book.submit(Owned(2, 7, Side::Sell, 100, 10));  // client 7 now short 10
+
+  book.submit(Owned(3, 9000, Side::Sell, 101, 20));  // an ask to cover into
+  const SubmitOutcome out = book.submit(ReduceOnly(4, 7, Side::Buy, 101, 15));
+  REQUIRE(out.accepted);
+  REQUIRE(out.filled == 10);  // capped at the short -> position flat
 }
