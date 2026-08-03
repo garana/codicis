@@ -457,12 +457,12 @@ Linux (CI/container) during hardening.
             pegs. Queued orders can be cancelled before the cross. Wired into
             the app: order submission takes an `auction=moo|loo|moc|loc|opg`
             field, and `POST /auction` (form `symbol` + `phase=open|close`) runs
-            the cross via `TradingEngine::run_auction` (reports prints + fills to
-            storage, broadcasts market data), returning the executions. NB the
-            trigger is operator-driven (no automatic session clock yet); the
+            the cross via `TradingEngine::run_auction` (reports prints + fills
+            to storage, broadcasts market data), returning the executions. NB
+            the trigger is operator-driven (no automatic session clock yet); the
             endpoint should be access-controlled at the edge. Simplification:
-            the cross is over auction-designated orders only, not merged with the
-            resting continuous book. All six order-type CATEGORIES are now
+            the cross is over auction-designated orders only, not merged with
+            the resting continuous book. All six order-type CATEGORIES are now
             implemented; OT8 pull-levels-on-demand windowing is the remaining
             matching-engine work.
 - [~] Multi-symbol + market-data architecture (decided; see To Design):
