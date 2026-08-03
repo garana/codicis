@@ -75,6 +75,7 @@ target_link_libraries(test_engine PRIVATE codicis_engine)
 codicis_add_test(test_app
   unit/test_app.cc)
 target_link_libraries(test_app PRIVATE codicis_app)
-add_dependencies(test_app codicis_storage_helper)
+add_dependencies(test_app codicis_storage_helper codicis_auth_helper)
 target_compile_definitions(test_app PRIVATE
-  CODICIS_STORAGE_HELPER_PATH="$<TARGET_FILE:codicis_storage_helper>")
+  CODICIS_STORAGE_HELPER_PATH="$<TARGET_FILE:codicis_storage_helper>"
+  CODICIS_AUTH_HELPER_PATH="$<TARGET_FILE:codicis_auth_helper>")

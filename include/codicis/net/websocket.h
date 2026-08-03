@@ -46,6 +46,17 @@ using WsMessageFn = std::function<void(WsConnection& conn, bool is_binary,
 using WsCloseFn = std::function<void(std::uint64_t id)>;
 
 /**
+ * @brief Callback invoked once the opening handshake succeeds.
+ *
+ * Fires before any message callback, so owners can bind per-connection state
+ * (such as an authenticated identity) from the handshake's HTTP headers.
+ * @param conn      The now-open connection.
+ * @param handshake The upgrade request, whose headers carry any credentials.
+ */
+using WsOpenFn =
+    std::function<void(WsConnection& conn, const HttpRequest& handshake)>;
+
+/**
  * @brief One WebSocket connection: handshake, then framed messaging.
  */
 class WsConnection final : public IoHandler {
@@ -57,9 +68,11 @@ class WsConnection final : public IoHandler {
    * @param id         A unique connection id (never reused).
    * @param on_message Message callback.
    * @param on_close   Owner callback invoked once when the connection closes.
+   * @param on_open    Optional callback invoked once the handshake succeeds.
    */
   WsConnection(EventLoop& loop, int fd, std::uint64_t id,
-               WsMessageFn on_message, std::function<void(int)> on_close);
+               WsMessageFn on_message, std::function<void(int)> on_close,
+               WsOpenFn on_open = {});
 
   ~WsConnection() override;
 
@@ -108,6 +121,7 @@ class WsConnection final : public IoHandler {
   std::uint64_t id_;
   WsMessageFn on_message_;
   std::function<void(int)> on_close_;
+  WsOpenFn on_open_;
 
   Buffer in_;
   Buffer out_;
@@ -136,8 +150,11 @@ class WsServer {
    * @param on_close   Optional callback invoked when a connection closes (so
    *                   owners can drop per-connection state such as market-data
    *                   subscriptions).
+   * @param on_open    Optional callback invoked once a handshake succeeds (so
+   *                   owners can authenticate the connection from its headers).
    */
-  WsServer(EventLoop& loop, WsMessageFn on_message, WsCloseFn on_close = {});
+  WsServer(EventLoop& loop, WsMessageFn on_message, WsCloseFn on_close = {},
+           WsOpenFn on_open = {});
 
   ~WsServer();
 
@@ -177,6 +194,7 @@ class WsServer {
   EventLoop& loop_;
   WsMessageFn on_message_;
   WsCloseFn on_close_;
+  WsOpenFn on_open_;
   std::unique_ptr<TcpListener> listener_;
   std::unordered_map<int, std::unique_ptr<WsConnection>> conns_;
   std::uint64_t next_conn_id_ = 1;

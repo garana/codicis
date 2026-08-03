@@ -284,6 +284,42 @@ Status AppServer::start() {
   storage_ = std::make_unique<StorageClient>(*helper_);
   engine_ = std::make_unique<TradingEngine>(matching_, *storage_);
 
+  // Authentication: Option A (trusted header) and/or Option B (helper pool).
+  auth_header_enabled_ = config_.get_bool("auth.header.enabled").value();
+  auth_header_name_ = config_.get_string("auth.header.name").value();
+  auth_helper_enabled_ = config_.get_bool("auth.helper.enabled").value();
+  auth_credential_header_ =
+      config_.get_string("auth.helper.credential_header").value();
+  if (auth_helper_enabled_) {
+    AuthClient::Config ac;
+    ac.argv = Split(config_.get_string("auth.helper.cmd").value(), ' ');
+    if (ac.argv.empty()) {
+      return Status(MakeError(ErrorCode::kInvalidArg, "empty auth.helper.cmd"));
+    }
+    ac.concurrency = static_cast<std::size_t>(
+        config_.get_int("auth.helper.concurrency").value());
+    const bool pipelining = config_.get_bool("auth.helper.pipelining").value();
+    const std::int64_t depth =
+        config_.get_int("auth.helper.pipeline_depth").value();
+    ac.depth = pipelining ? static_cast<std::size_t>(depth) : 1;
+    ac.request_timeout_ns =
+        config_.get_int("auth.helper.request_timeout_ms").value() * 1'000'000;
+    ac.positive_capacity = static_cast<std::size_t>(
+        config_.get_int("auth.cache.max_entries").value());
+    ac.positive_ttl_ns =
+        config_.get_int("auth.cache.ttl_ms").value() * 1'000'000;
+    ac.negative_capacity = static_cast<std::size_t>(
+        config_.get_int("auth.cache.negative_max_entries").value());
+    ac.negative_ttl_ns =
+        config_.get_int("auth.cache.negative_ttl_ms").value() * 1'000'000;
+    Result<std::unique_ptr<AuthClient>> ar =
+        AuthClient::Create(loop_, auth_clock_, std::move(ac));
+    if (!ar.ok()) {
+      return ar.error();
+    }
+    auth_ = std::move(ar.value());
+  }
+
   setup_routes();
   const std::string addr = config_.get_string("net.bind_address").value();
 
@@ -301,9 +337,13 @@ Status AppServer::start() {
         handle_ws_message(conn, is_binary, payload);
       },
       [this](std::uint64_t id) {
+        conn_owner_.erase(id);
         for (auto& [symbol, subs] : md_subscribers_) {
           subs.erase(id);
         }
+      },
+      [this](WsConnection& conn, const HttpRequest& handshake) {
+        on_ws_open(conn, handshake);
       });
   const auto ws_port_cfg = static_cast<std::uint16_t>(
       config_.get_int("net.ws_port").value());
@@ -345,10 +385,10 @@ void AppServer::setup_routes() {
                     [this](const HttpRequest& r, const HttpResponder& respond) {
                       handle_submit(r, respond);
                     });
-  router_.add("POST", "/orders/cancel",
-              [this](const HttpRequest& r, HttpResponse& p) {
-                handle_cancel(r, p);
-              });
+  router_.add_async("POST", "/orders/cancel",
+                    [this](const HttpRequest& r, const HttpResponder& respond) {
+                      handle_cancel(r, respond);
+                    });
   router_.add("GET", "/book", [this](const HttpRequest& r, HttpResponse& p) {
     handle_book(r, p);
   });
@@ -357,44 +397,47 @@ void AppServer::setup_routes() {
 void AppServer::handle_submit(const HttpRequest& req,
                               const HttpResponder& respond) {
   // Parse the request synchronously (the request is not valid after we return).
-  const auto form = ParseForm(req.body);
   Symbol symbol;
   Order order;  // the engine assigns the id
   std::string err;
-  if (!ParseOrderForm(form, &symbol, &order, &err)) {
+  if (!ParseOrderForm(ParseForm(req.body), &symbol, &order, &err)) {
     HttpResponse resp;
     JsonError(resp, 400, err);
     respond(std::move(resp));
     return;
   }
-  const std::string* user = FormGet(form, "user");
-  if (user == nullptr || !IsValidUuidString(*user)) {
-    HttpResponse resp;
-    JsonError(resp, 400, "missing or invalid user");
-    respond(std::move(resp));
-    return;
-  }
 
-  // Report-before-place: the engine reports the order to storage first, and
-  // reports the resulting trades and fills; we respond once it has placed.
-  engine_->submit(
-      symbol, *user, order,
-      [this, symbol, respond](const TradingEngine::Result& res) {
-        HttpResponse resp;
-        resp.set_header("Content-Type", "application/json");
-        if (!res.storage_ok) {
-          resp.set_status(503);
-        } else if (!res.outcome.accepted) {
-          resp.set_status(409);
-        } else {
-          resp.set_status(200);
-        }
-        resp.body = ResultBody(res);
-        respond(std::move(resp));
-        if (res.storage_ok && res.outcome.accepted) {
-          broadcast_market_data(symbol, res.outcome.trades);
-        }
-      });
+  // The owner comes only from the authenticated identity, never the body.
+  authenticate(req, [this, symbol, order, respond](
+                        bool ok, int status, const std::string& owner,
+                        const std::string& auth_err) {
+    if (!ok) {
+      HttpResponse resp;
+      JsonError(resp, status, auth_err);
+      respond(std::move(resp));
+      return;
+    }
+    // Report-before-place: the engine reports the order to storage first, and
+    // reports the resulting trades and fills; we respond once it has placed.
+    engine_->submit(
+        symbol, owner, order,
+        [this, symbol, respond](const TradingEngine::Result& res) {
+          HttpResponse resp;
+          resp.set_header("Content-Type", "application/json");
+          if (!res.storage_ok) {
+            resp.set_status(503);
+          } else if (!res.outcome.accepted) {
+            resp.set_status(409);
+          } else {
+            resp.set_status(200);
+          }
+          resp.body = ResultBody(res);
+          respond(std::move(resp));
+          if (res.storage_ok && res.outcome.accepted) {
+            broadcast_market_data(symbol, res.outcome.trades);
+          }
+        });
+  });
 }
 
 void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
@@ -430,15 +473,18 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
     conn.send_text(JsonErrorBody(err));
     return;
   }
-  const std::string* user = FormGet(form, "user");
-  if (user == nullptr || !IsValidUuidString(*user)) {
-    conn.send_text(JsonErrorBody("missing or invalid user"));
+  // Identity is per-connection, resolved once at the handshake (Option A/B) or
+  // anonymous when auth is disabled. A missing entry means it did not resolve.
+  const auto oit = conn_owner_.find(conn.id());
+  if (oit == conn_owner_.end()) {
+    conn.send_text(JsonErrorBody("unauthenticated"));
     return;
   }
+  const std::string owner = oit->second;
   const int fd = conn.fd();
   const std::uint64_t id = conn.id();
   engine_->submit(
-      symbol, *user, order,
+      symbol, owner, order,
       [this, symbol, fd, id](const TradingEngine::Result& res) {
         ws_->deliver_text(fd, id, ResultBody(res));
         if (res.storage_ok && res.outcome.accepted) {
@@ -447,33 +493,104 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
       });
 }
 
-void AppServer::handle_cancel(const HttpRequest& req, HttpResponse& resp) {
+void AppServer::handle_cancel(const HttpRequest& req,
+                              const HttpResponder& respond) {
   const auto form = ParseForm(req.body);
   const std::string* order_uuid = FormGet(form, "order");
-  const std::string* user = FormGet(form, "user");
   if (order_uuid == nullptr || !IsValidUuidString(*order_uuid)) {
-    return JsonError(resp, 400, "missing or invalid order");
+    HttpResponse resp;
+    JsonError(resp, 400, "missing or invalid order");
+    respond(std::move(resp));
+    return;
   }
-  if (user == nullptr || !IsValidUuidString(*user)) {
-    return JsonError(resp, 400, "missing or invalid user");
+  const std::string handle = *order_uuid;
+
+  // The requester's identity comes from authentication; authorization then
+  // checks it against the resting order's owner.
+  authenticate(req, [this, handle, respond](bool ok, int status,
+                                            const std::string& owner,
+                                            const std::string& auth_err) {
+    HttpResponse resp;
+    resp.set_header("Content-Type", "application/json");
+    if (!ok) {
+      JsonError(resp, status, auth_err);
+      respond(std::move(resp));
+      return;
+    }
+    Symbol symbol;
+    switch (engine_->cancel(handle, owner, &symbol)) {
+      case CancelResult::kOk:
+        resp.set_status(200);
+        resp.body = "{\"cancelled\":true}";
+        broadcast_market_data(symbol, {});  // the top of book may have changed
+        break;
+      case CancelResult::kNotFound:
+        JsonError(resp, 404, "unknown order");
+        break;
+      case CancelResult::kForbidden:
+        JsonError(resp, 403, "not the order owner");
+        break;
+    }
+    respond(std::move(resp));
+  });
+}
+
+void AppServer::on_ws_open(WsConnection& conn, const HttpRequest& handshake) {
+  const std::uint64_t id = conn.id();
+  authenticate(handshake, [this, id](bool ok, int /*status*/,
+                                     const std::string& owner,
+                                     const std::string& /*err*/) {
+    if (ok) {
+      conn_owner_[id] = owner;  // "" when auth is disabled (anonymous)
+    }
+    // On failure the connection stays unauthenticated: order frames are
+    // rejected until a valid identity is presented on a new connection.
+    // Market-data subscriptions remain available regardless.
+  });
+}
+
+void AppServer::authenticate(const HttpRequest& req, AuthFn cb) {
+  if (!auth_header_enabled_ && !auth_helper_enabled_) {
+    cb(true, 200, std::string(), std::string());  // anonymous
+    return;
   }
-  // Authorize by owner: the requesting user must own the resting order.
-  Symbol symbol;
-  const CancelResult result = engine_->cancel(*order_uuid, *user, &symbol);
-  resp.set_header("Content-Type", "application/json");
-  switch (result) {
-    case CancelResult::kOk:
-      resp.set_status(200);
-      resp.body = "{\"cancelled\":true}";
-      broadcast_market_data(symbol, {});  // the top of book may have changed
-      break;
-    case CancelResult::kNotFound:
-      JsonError(resp, 404, "unknown order");
-      break;
-    case CancelResult::kForbidden:
-      JsonError(resp, 403, "not the order owner");
-      break;
+
+  // Option A: a user UUID in a header trusted from an authenticating edge.
+  std::string header_uuid;
+  if (auth_header_enabled_) {
+    const std::string* h = req.header(auth_header_name_);
+    if (h == nullptr || !IsValidUuidString(*h)) {
+      cb(false, 401, std::string(), "missing or invalid identity header");
+      return;
+    }
+    header_uuid = *h;
   }
+
+  if (!auth_helper_enabled_) {
+    cb(true, 200, header_uuid, std::string());
+    return;
+  }
+
+  // Option B: validate a credential header via the auth helper pool.
+  const std::string* cred = req.header(auth_credential_header_);
+  if (cred == nullptr || cred->empty()) {
+    cb(false, 401, std::string(), "missing credential");
+    return;
+  }
+  const bool have_header = auth_header_enabled_;
+  auth_->resolve(*cred, [cb, header_uuid, have_header](
+                            bool resolved, const std::string& helper_uuid) {
+    if (!resolved) {
+      cb(false, 403, std::string(), "authentication failed");
+      return;
+    }
+    // Defense in depth: when both mechanisms are enabled they must agree.
+    if (have_header && header_uuid != helper_uuid) {
+      cb(false, 403, std::string(), "identity mismatch");
+      return;
+    }
+    cb(true, 200, helper_uuid, std::string());
+  });
 }
 
 void AppServer::handle_book(const HttpRequest& req, HttpResponse& resp) {

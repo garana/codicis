@@ -82,6 +82,23 @@ std::string Post(const std::string& path, const std::string& body) {
          std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
 }
 
+/**
+ * @brief Build a POST with extra header lines (each "Name: value\r\n").
+ * @param path    The request target.
+ * @param headers Additional header lines, concatenated verbatim.
+ * @param body    The form body.
+ */
+std::string PostH(const std::string& path, const std::string& headers,
+                  const std::string& body) {
+  return "POST " + path + " HTTP/1.1\r\nHost: x\r\n" + headers +
+         "Content-Length: " + std::to_string(body.size()) +
+         "\r\nConnection: close\r\n\r\n" + body;
+}
+
+/** @brief A valid v4 UUID used as a test owner identity. */
+const std::string kUserA = "11111111-1111-4111-8111-111111111111";
+const std::string kUserB = "22222222-2222-4222-8222-222222222222";
+
 }  // namespace
 
 TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
@@ -114,12 +131,10 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
   }
 
   SECTION("crossing orders trade") {
-    // Resting sell.
+    // Resting sell (anonymous: auth is disabled in this test).
     std::string r1 =
-        RoundTrip(loop, port,
-                  Post("/orders", "symbol=BTC&side=sell&type=limit&price=100&"
-                                  "qty=10&user=11111111-1111-4111-8111-"
-                                  "111111111111"));
+        RoundTrip(loop, port, Post("/orders", "symbol=BTC&side=sell&type=limit&"
+                                              "price=100&qty=10"));
     REQUIRE(r1.find("\"accepted\":true") != std::string::npos);
 
     // The book shows the resting ask.
@@ -128,12 +143,10 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
                   "GET /book?symbol=BTC HTTP/1.1\r\nConnection: close\r\n\r\n");
     REQUIRE(rb.find("\"ask\":100") != std::string::npos);
 
-    // Aggressive buy (a different owner) crosses and trades.
+    // Aggressive buy crosses and trades.
     std::string r2 =
-        RoundTrip(loop, port,
-                  Post("/orders", "symbol=BTC&side=buy&type=limit&price=100&"
-                                  "qty=10&user=22222222-2222-4222-8222-"
-                                  "222222222222"));
+        RoundTrip(loop, port, Post("/orders", "symbol=BTC&side=buy&type=limit&"
+                                              "price=100&qty=10"));
     REQUIRE(r2.find("\"filled\":10") != std::string::npos);
     REQUIRE(r2.find("\"maker\":1") != std::string::npos);
   }
@@ -239,16 +252,12 @@ TEST_CASE("WebSocket order submission matches end-to-end", "[app][ws]") {
   const int c = WsConnect(loop, wsport);
 
   // Two orders on one WebSocket connection: a resting sell, then a crossing buy.
-  const std::string r1 = WsSubmit(
-      loop, c,
-      "symbol=BTC&side=sell&type=limit&price=100&qty=10&user="
-      "11111111-1111-4111-8111-111111111111");
+  const std::string r1 =
+      WsSubmit(loop, c, "symbol=BTC&side=sell&type=limit&price=100&qty=10");
   REQUIRE(r1.find("\"accepted\":true") != std::string::npos);
 
-  const std::string r2 = WsSubmit(
-      loop, c,
-      "symbol=BTC&side=buy&type=limit&price=100&qty=10&user="
-      "22222222-2222-4222-8222-222222222222");
+  const std::string r2 =
+      WsSubmit(loop, c, "symbol=BTC&side=buy&type=limit&price=100&qty=10");
   REQUIRE(r2.find("\"filled\":10") != std::string::npos);
   REQUIRE(r2.find("\"maker\":1") != std::string::npos);
 
@@ -280,18 +289,14 @@ TEST_CASE("WebSocket subscribers receive market-data updates", "[app][ws][md]") 
   const int ord = WsConnect(loop, wsport);
 
   // A resting sell over the order connection publishes a book update.
-  WsSend(loop, ord,
-         "symbol=BTC&side=sell&type=limit&price=100&qty=10&user="
-         "11111111-1111-4111-8111-111111111111");
+  WsSend(loop, ord, "symbol=BTC&side=sell&type=limit&price=100&qty=10");
   REQUIRE(WsRecvFrame(loop, ord).find("\"accepted\":true") != std::string::npos);
   const std::string md1 = WsRecvFrame(loop, sub);
   REQUIRE(md1.find("\"type\":\"md\"") != std::string::npos);
   REQUIRE(md1.find("\"ask\":100") != std::string::npos);
 
-  // A crossing buy (a different owner) publishes the resulting trade.
-  WsSend(loop, ord,
-         "symbol=BTC&side=buy&type=limit&price=100&qty=4&user="
-         "22222222-2222-4222-8222-222222222222");
+  // A crossing buy publishes the resulting trade.
+  WsSend(loop, ord, "symbol=BTC&side=buy&type=limit&price=100&qty=4");
   REQUIRE(WsRecvFrame(loop, ord).find("\"filled\":4") != std::string::npos);
   const std::string md2 = WsRecvFrame(loop, sub);
   REQUIRE(md2.find("\"trades\":[{\"price\":100,\"qty\":4}]") !=
@@ -299,4 +304,134 @@ TEST_CASE("WebSocket subscribers receive market-data updates", "[app][ws][md]") 
 
   ::close(sub);
   ::close(ord);
+}
+
+namespace {
+
+/** @brief Common order body used by the auth tests. */
+const std::string kOrderBody = "symbol=BTC&side=buy&type=limit&price=100&qty=5";
+
+/** @brief The storage-helper CLI flag shared by every server under test. */
+std::string StorageFlag() {
+  return std::string("--storage.helper_cmd=") + CODICIS_STORAGE_HELPER_PATH;
+}
+
+}  // namespace
+
+TEST_CASE("HTTP header auth supplies the owner identity", "[app][auth]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string storage = StorageFlag();
+  std::vector<const char*> argv = {"codicis",     "--net.http_port=0",
+                                   "--net.ws_port=0", storage.c_str(),
+                                   "--auth.header.enabled=true"};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t port = server.http_port();
+
+  SECTION("a valid identity header is accepted") {
+    const std::string r = RoundTrip(
+        loop, port, PostH("/orders", "X-User-Id: " + kUserA + "\r\n", kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 200", 0) == 0);
+    REQUIRE(r.find("\"accepted\":true") != std::string::npos);
+  }
+  SECTION("a missing identity header is rejected 401") {
+    const std::string r = RoundTrip(loop, port, Post("/orders", kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 401", 0) == 0);
+  }
+  SECTION("an invalid identity header is rejected 401") {
+    const std::string r = RoundTrip(
+        loop, port, PostH("/orders", "X-User-Id: not-a-uuid\r\n", kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 401", 0) == 0);
+  }
+}
+
+TEST_CASE("HTTP helper auth validates a credential", "[app][auth]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string storage = StorageFlag();
+  const std::string auth_cmd =
+      std::string("--auth.helper.cmd=") + CODICIS_AUTH_HELPER_PATH;
+  std::vector<const char*> argv = {
+      "codicis",         "--net.http_port=0", "--net.ws_port=0",
+      storage.c_str(),   "--auth.helper.enabled=true", auth_cmd.c_str()};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t port = server.http_port();
+
+  SECTION("a valid credential is accepted") {
+    const std::string r = RoundTrip(
+        loop, port,
+        PostH("/orders", "Authorization: " + kUserA + ":good\r\n", kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 200", 0) == 0);
+    REQUIRE(r.find("\"accepted\":true") != std::string::npos);
+  }
+  SECTION("a bad credential is rejected 403") {
+    const std::string r = RoundTrip(
+        loop, port,
+        PostH("/orders", "Authorization: " + kUserA + ":bad\r\n", kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 403", 0) == 0);
+  }
+  SECTION("a missing credential is rejected 401") {
+    const std::string r = RoundTrip(loop, port, Post("/orders", kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 401", 0) == 0);
+  }
+}
+
+TEST_CASE("HTTP header + helper auth must agree", "[app][auth]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string storage = StorageFlag();
+  const std::string auth_cmd =
+      std::string("--auth.helper.cmd=") + CODICIS_AUTH_HELPER_PATH;
+  std::vector<const char*> argv = {"codicis",
+                                   "--net.http_port=0",
+                                   "--net.ws_port=0",
+                                   storage.c_str(),
+                                   "--auth.header.enabled=true",
+                                   "--auth.helper.enabled=true",
+                                   auth_cmd.c_str()};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t port = server.http_port();
+
+  SECTION("matching header and credential are accepted") {
+    const std::string r =
+        RoundTrip(loop, port,
+                  PostH("/orders",
+                        "X-User-Id: " + kUserA + "\r\nAuthorization: " + kUserA +
+                            ":good\r\n",
+                        kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 200", 0) == 0);
+  }
+  SECTION("a mismatched header vs credential is rejected 403") {
+    const std::string r =
+        RoundTrip(loop, port,
+                  PostH("/orders",
+                        "X-User-Id: " + kUserA + "\r\nAuthorization: " + kUserB +
+                            ":good\r\n",
+                        kOrderBody));
+    REQUIRE(r.rfind("HTTP/1.1 403", 0) == 0);
+  }
 }

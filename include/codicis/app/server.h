@@ -17,16 +17,20 @@
  */
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
+#include "codicis/auth/auth_client.h"
 #include "codicis/config/config.h"
 #include "codicis/core/matching_engine.h"
 #include "codicis/core/order_book.h"
 #include "codicis/engine/trading_engine.h"
 #include "codicis/event/event_loop.h"
+#include "codicis/util/clock.h"
 #include "codicis/ipc/helper_client.h"
 #include "codicis/ipc/helper_codec.h"
 #include "codicis/ipc/storage_client.h"
@@ -68,12 +72,37 @@ class AppServer : public TimerHandler {
  private:
   void setup_routes();
   void handle_submit(const HttpRequest& req, const HttpResponder& respond);
-  void handle_cancel(const HttpRequest& req, HttpResponse& resp);
+  void handle_cancel(const HttpRequest& req, const HttpResponder& respond);
   void handle_book(const HttpRequest& req, HttpResponse& resp);
 
   /** @brief Submit an order received over a WebSocket and stream the result. */
   void handle_ws_message(WsConnection& conn, bool is_binary,
                          std::string_view payload);
+
+  /** @brief Resolve the connection's owner identity from the handshake. */
+  void on_ws_open(WsConnection& conn, const HttpRequest& handshake);
+
+  /**
+   * @brief Result of authenticating a request.
+   * @param ok     True if the request carries a trusted identity.
+   * @param status HTTP status to return when @p ok is false (401/403).
+   * @param owner  The authenticated owner UUID ("" when auth is disabled).
+   * @param err    A human-readable reason when @p ok is false.
+   */
+  using AuthFn = std::function<void(bool ok, int status, std::string owner,
+                                    std::string err)>;
+
+  /**
+   * @brief Authenticate a request per the configured mechanisms.
+   *
+   * Reads the identity from the trusted header (Option A) and/or validates a
+   * credential header via the auth helper (Option B). When both are enabled
+   * they must both pass and resolve to the same UUID. Invokes @p cb (possibly
+   * asynchronously, when the helper is consulted). Anonymous ("" owner) when no
+   * mechanism is enabled. The request's headers are read synchronously, so the
+   * request need not outlive the call.
+   */
+  void authenticate(const HttpRequest& req, AuthFn cb);
 
   /**
    * @brief Push a market-data update (top of book + trades) to a symbol's
@@ -95,6 +124,17 @@ class AppServer : public TimerHandler {
   std::unique_ptr<TradingEngine> engine_;
   std::unique_ptr<HttpServer> http_;
   std::unique_ptr<WsServer> ws_;
+
+  // Authentication (identity of the requesting user).
+  bool auth_header_enabled_ = false;
+  std::string auth_header_name_;
+  bool auth_helper_enabled_ = false;
+  std::string auth_credential_header_;
+  WallClock auth_clock_;  // wall time for AuthClient cache expiry
+  std::unique_ptr<AuthClient> auth_;
+
+  // Per-connection authenticated owner (present once a WS handshake resolves).
+  std::unordered_map<std::uint64_t, std::string> conn_owner_;
 
   // Market-data subscribers per symbol: symbol -> (connection id -> fd).
   std::unordered_map<Symbol, std::unordered_map<std::uint64_t, int>>
