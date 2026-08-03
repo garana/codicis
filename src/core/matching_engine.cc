@@ -14,7 +14,7 @@ OrderBook& MatchingEngine::book_for(const Symbol& symbol) {
   if (it != books_.end()) {
     return *it->second;
   }
-  auto book = std::make_unique<OrderBook>(stp_);
+  auto book = std::make_unique<OrderBook>(stp_, mem_levels_);
   OrderBook& ref = *book;
   books_.emplace(symbol, std::move(book));
   return ref;

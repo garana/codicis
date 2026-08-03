@@ -234,6 +234,15 @@ struct OrderBook::Impl {
   std::pmr::unordered_map<ClientId, Position> positions;  // reduce-only risk
   std::vector<Order> opening_auction;  // MOO/LOO/OPG awaiting the open cross
   std::vector<Order> closing_auction;  // MOC/LOC awaiting the close cross
+
+  /** @brief Deep (non-resident) liquidity summary for one side. */
+  struct Deep {
+    bool has = false;      /**< Any liquidity beyond the resident window. */
+    Ticks boundary = 0;    /**< Nearest deep price (adjacent to the window). */
+  };
+  std::size_t mem_levels = 0;  // max resident populated levels/side (0=unbounded)
+  Deep deep_bid;
+  Deep deep_ask;
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
   bool have_last = false;
@@ -549,12 +558,124 @@ struct OrderBook::Impl {
     return false;
   }
 
+  /** @return The deep-liquidity summary for side @p s. */
+  Deep& deep_of(Side s) { return s == Side::Buy ? deep_bid : deep_ask; }
+  const Deep& deep_of(Side s) const {
+    return s == Side::Buy ? deep_bid : deep_ask;
+  }
+
+  /** @return The number of populated (total > 0) levels on ladder @p L. */
+  std::size_t populated_count(const Ladder& L) const {
+    std::size_t n = 0;
+    for (const Level& lvl : L.levels) {
+      if (lvl.total > 0) {
+        ++n;
+      }
+    }
+    return n;
+  }
+
   /**
-   * @brief Rest the remainder of o on its own side.
-   * @param o The order with leaves > 0.
+   * @brief The worst (farthest-from-top) resident price on ladder @p L.
+   * @param L   The ladder.
+   * @param out Receives the price on success.
+   * @return True if the ladder has any populated level.
    */
-  void rest(const Order& o) {
+  bool worst_price(const Ladder& L, Ticks* out) const {
+    if (!L.has_base) {
+      return false;
+    }
+    if (L.side == Side::Buy) {  // worst bid = lowest populated price
+      for (std::size_t i = 0; i < L.levels.size(); ++i) {
+        if (L.levels[i].total > 0) {
+          *out = L.base + static_cast<Ticks>(i);
+          return true;
+        }
+      }
+    } else {  // worst ask = highest populated price
+      for (std::size_t i = L.levels.size(); i-- > 0;) {
+        if (L.levels[i].total > 0) {
+          *out = L.base + static_cast<Ticks>(i);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** @return True if price @p p is worse (farther from top) than @p ref. */
+  static bool worse_than(Side s, Ticks p, Ticks ref) {
+    return s == Side::Buy ? p < ref : p > ref;
+  }
+
+  /** @brief Record that @p price now holds deep liquidity on side @p s. */
+  void note_deep(Side s, Ticks price) {
+    Deep& d = deep_of(s);
+    // The nearest deep price is the one closest to the resident window: the
+    // highest deep bid, or the lowest deep ask.
+    if (!d.has) {
+      d.boundary = price;
+    } else {
+      d.boundary = s == Side::Buy ? std::max(d.boundary, price)
+                                  : std::min(d.boundary, price);
+    }
+    d.has = true;
+  }
+
+  /** @brief Evict the worst resident level to deep, collecting its orders. */
+  void evict_worst(Ladder& L, std::vector<Order>* evicted) {
+    Ticks wp = 0;
+    if (!worst_price(L, &wp)) {
+      return;
+    }
+    Level* lvl = L.at(wp);
+    if (lvl == nullptr) {
+      return;
+    }
+    for (const OrderId id : lvl->fifo) {
+      const auto it = orders.find(id);
+      if (it != orders.end()) {
+        if (evicted != nullptr) {
+          evicted->push_back(it->second.order);
+        }
+        pegged.erase(id);  // a deep order does not reprice in memory
+        orders.erase(it);  // note: reduce-only reservation is retained
+      }
+    }
+    lvl->fifo.clear();
+    lvl->total = 0;
+    lvl->displayed = 0;
+    L.on_removed(wp);
+    note_deep(L.side, wp);  // this level is now the nearest deep one
+  }
+
+  /**
+   * @brief Rest the remainder of o on its own side, honoring the window.
+   *
+   * With a bounded window (mem_levels > 0): an order that would open a NEW
+   * price level worse than the current worst resident level, when the side is
+   * already full, is NOT materialized -- it rests deep (persisted elsewhere).
+   * A better order that overgrows the window evicts the worst resident level.
+   * @param o       The order with leaves > 0.
+   * @param evicted If non-null, receives any levels pushed out to deep.
+   * @return True if the order was materialized resident; false if it rests deep.
+   */
+  bool rest(const Order& o, std::vector<Order>* evicted = nullptr) {
     Ladder& own = ladder(o.side);
+    bool new_level = true;
+    if (mem_levels > 0) {
+      const Level* existing = own.at(o.price);
+      new_level = existing == nullptr || existing->total == 0;
+      if (new_level) {
+        Ticks worst = 0;
+        if (worst_price(own, &worst) && populated_count(own) >= mem_levels &&
+            worse_than(o.side, o.price, worst)) {
+          note_deep(o.side, o.price);  // beyond the window -> rests deep
+          return false;
+        }
+      }
+    }
+
     Level& lvl = own.touch(o.price);
     lvl.fifo.push_back(o.id);
     auto it = std::prev(lvl.fifo.end());
@@ -571,6 +692,33 @@ struct OrderBook::Impl {
     if (is_reduce_only(o) && o.client_id != 0) {
       reserved_on(positions[o.client_id], o.side) += o.leaves;
     }
+    // A new level better than the window's far edge overgrows it: evict.
+    if (mem_levels > 0 && new_level && populated_count(own) > mem_levels) {
+      evict_worst(own, evicted);
+    }
+    return true;
+  }
+
+  /**
+   * @brief Materialize a pulled-back resting order without matching/windowing.
+   *
+   * The order is already known-resting (from storage); place it directly. Its
+   * reduce-only reservation was retained across eviction, so it is not
+   * re-applied here.
+   * @param o The resting order to insert.
+   */
+  void insert_resident(const Order& o) {
+    Ladder& own = ladder(o.side);
+    Level& lvl = own.touch(o.price);
+    lvl.fifo.push_back(o.id);
+    auto it = std::prev(lvl.fifo.end());
+    const Quantity slice = HasFlag(o.flags, OrderFlag::kIceberg)
+                               ? std::min(o.display_qty, o.leaves)
+                               : 0;
+    lvl.total += o.leaves;
+    lvl.displayed += DisplayedOf(o.flags, o.leaves, slice);
+    own.on_added(o.price);
+    orders.emplace(o.id, Entry{.order = o, .pos = it, .slice = slice});
   }
 
   /**
@@ -1004,6 +1152,12 @@ OrderBook::OrderBook(StpPolicy stp) : impl_(std::make_unique<Impl>()) {
   impl_->stp = stp;
 }
 
+OrderBook::OrderBook(StpPolicy stp, std::size_t mem_levels)
+    : impl_(std::make_unique<Impl>()) {
+  impl_->stp = stp;
+  impl_->mem_levels = mem_levels;
+}
+
 OrderBook::~OrderBook() = default;
 
 SubmitOutcome OrderBook::submit(Order order) {
@@ -1087,9 +1241,12 @@ SubmitOutcome OrderBook::submit(Order order) {
     }
     order.type = OrdType::Limit;
     order.price = price;
-    impl_->rest(order);
-    impl_->pegged.insert(order.id);
-    out.rested = true;
+    const bool resident = impl_->rest(order, &out.evicted);
+    if (resident) {
+      impl_->pegged.insert(order.id);  // only resident pegs reprice
+    }
+    out.rested = resident;
+    out.rested_deep = !resident;
     return out;
   }
 
@@ -1133,8 +1290,9 @@ SubmitOutcome OrderBook::submit(Order order) {
         out.reject_reason = "all-or-none not fully fillable";
         return out;
       }
-      impl_->rest(order);
-      out.rested = true;
+      const bool resident = impl_->rest(order, &out.evicted);
+      out.rested = resident;
+      out.rested_deep = !resident;
       impl_->reprice_pegs();
       return out;
     }
@@ -1162,8 +1320,9 @@ SubmitOutcome OrderBook::submit(Order order) {
     const bool discard =
         order.type == OrdType::Market || order.tif == Tif::IOC;
     if (!discard) {
-      impl_->rest(order);
-      out.rested = true;
+      const bool resident = impl_->rest(order, &out.evicted);
+      out.rested = resident;
+      out.rested_deep = !resident;
     }
   }
 
@@ -1366,6 +1525,27 @@ void OrderBook::seed_position(ClientId client, Quantity net) {
 Quantity OrderBook::position(ClientId client) const {
   const auto it = impl_->positions.find(client);
   return it == impl_->positions.end() ? 0 : it->second.net;
+}
+
+void OrderBook::insert_resident(const Order& order) {
+  impl_->insert_resident(order);
+}
+
+bool OrderBook::has_deep(Side side) const {
+  return impl_->deep_of(side).has;
+}
+
+bool OrderBook::deep_boundary(Side side, Ticks* out) const {
+  const Impl::Deep& d = impl_->deep_of(side);
+  if (!d.has) {
+    return false;
+  }
+  *out = d.boundary;
+  return true;
+}
+
+bool OrderBook::worst_resident(Side side, Ticks* out) const {
+  return impl_->worst_price(impl_->ladder(side), out);
 }
 
 std::vector<Trade> OrderBook::run_opening_auction() {

@@ -45,10 +45,14 @@ struct SubmitOutcome {
   std::string reject_reason;    /**< Populated when !accepted. */
   std::vector<Trade> trades;    /**< Executions produced, incl. cascades. */
   Quantity filled = 0;          /**< Total quantity executed. */
-  bool rested = false;          /**< True if a remainder rests in the book. */
+  bool rested = false;          /**< True if a remainder rests resident. */
+  bool rested_deep = false;     /**< True if it rests beyond the resident
+                                     window (persisted, not in memory). */
   bool pending_trigger = false; /**< True if parked awaiting a stop trigger. */
   bool held = false;            /**< True if held as an OTO/bracket child. */
   OrderId order_id = 0;         /**< The submitted order's id. */
+  std::vector<Order> evicted;   /**< Resting orders pushed out of the resident
+                                     window by this order (now deep). */
 };
 
 /**
@@ -74,6 +78,15 @@ class OrderBook {
    * @param stp The policy to apply on same-account crossings.
    */
   explicit OrderBook(StpPolicy stp);
+
+  /**
+   * @brief Construct with an STP policy and a resident-window bound.
+   * @param stp        The self-trade prevention policy.
+   * @param mem_levels Max populated price levels kept resident per side
+   *                   (0 = unbounded; orders beyond the window rest "deep",
+   *                   persisted but not held in memory).
+   */
+  OrderBook(StpPolicy stp, std::size_t mem_levels);
 
   ~OrderBook();
 
@@ -181,6 +194,39 @@ class OrderBook {
    * @return The net position, or 0 if the account is unknown.
    */
   Quantity position(ClientId client) const;
+
+  /**
+   * @brief Insert a resting order pulled back from storage, WITHOUT matching.
+   *
+   * Used to re-materialize a deep level into the resident window. The order is
+   * assumed already resting (its leaves/seq are authoritative); it is placed
+   * into the ladder and index directly, not run through the matcher.
+   * @param order The resting order to materialize.
+   */
+  void insert_resident(const Order& order);
+
+  /**
+   * @brief Whether deep (non-resident) liquidity exists on a side.
+   * @param side The book side.
+   * @return True if orders rest beyond the resident window on that side.
+   */
+  bool has_deep(Side side) const;
+
+  /**
+   * @brief The nearest deep price on a side (just beyond the resident window).
+   * @param side The book side.
+   * @param out  Receives the price on success.
+   * @return True if there is deep liquidity on that side.
+   */
+  bool deep_boundary(Side side, Ticks* out) const;
+
+  /**
+   * @brief The worst (farthest-from-top) resident price on a side.
+   * @param side The book side.
+   * @param out  Receives the price on success.
+   * @return True if the side has any resident order.
+   */
+  bool worst_resident(Side side, Ticks* out) const;
 
   /**
    * @brief Run the opening uniform-price auction over queued MOO/LOO/OPG orders.

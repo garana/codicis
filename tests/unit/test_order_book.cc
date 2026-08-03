@@ -913,3 +913,80 @@ TEST_CASE("A queued auction order can be cancelled before the cross",
   REQUIRE(book.run_opening_auction().empty());
   REQUIRE_FALSE(book.cancel(1));  // already gone
 }
+
+// ---- OT8 Phase 2: bounded resident window + eviction ----------------------
+
+TEST_CASE("An order beyond the resident window rests deep", "[core][window]") {
+  OrderBook book(StpPolicy::kNone, /*mem_levels=*/2);
+  book.submit(Limit(1, Side::Buy, 100, 10));
+  book.submit(Limit(2, Side::Buy, 99, 10));  // two resident bid levels
+  REQUIRE(book.resting_count() == 2);
+
+  // A deeper bid would open a third level beyond the window -> not materialized.
+  const SubmitOutcome out = book.submit(Limit(3, Side::Buy, 98, 10));
+  REQUIRE(out.accepted);
+  REQUIRE_FALSE(out.rested);   // not in memory...
+  REQUIRE(out.rested_deep);    // ...it rests deep (persisted elsewhere)
+  REQUIRE(book.resting_count() == 2);
+  REQUIRE(book.find(3) == nullptr);
+  REQUIRE(book.has_deep(Side::Buy));
+  Ticks db = 0;
+  REQUIRE(book.deep_boundary(Side::Buy, &db));
+  REQUIRE(db == 98);
+}
+
+TEST_CASE("A better order evicts the worst resident level", "[core][window]") {
+  OrderBook book(StpPolicy::kNone, 2);
+  book.submit(Limit(1, Side::Buy, 100, 10));
+  book.submit(Limit(2, Side::Buy, 99, 10));  // resident: 100, 99
+
+  // A new best bid overgrows the window; the worst level (99) is evicted.
+  const SubmitOutcome out = book.submit(Limit(3, Side::Buy, 101, 10));
+  REQUIRE(out.rested);
+  REQUIRE(out.evicted.size() == 1);
+  REQUIRE(out.evicted[0].id == 2);
+  REQUIRE(out.evicted[0].price == 99);
+  REQUIRE(book.resting_count() == 2);  // 101, 100 remain resident
+  REQUIRE(book.find(2) == nullptr);    // pushed out of memory
+  Ticks bid = 0;
+  REQUIRE(book.best_bid(&bid));
+  REQUIRE(bid == 101);
+  REQUIRE(book.has_deep(Side::Buy));
+  Ticks db = 0;
+  REQUIRE(book.deep_boundary(Side::Buy, &db));
+  REQUIRE(db == 99);
+}
+
+TEST_CASE("Ask-side window rests deep and insert_resident pulls it back",
+          "[core][window]") {
+  OrderBook book(StpPolicy::kNone, 2);
+  book.submit(Limit(1, Side::Sell, 100, 10));
+  book.submit(Limit(2, Side::Sell, 101, 10));
+
+  const SubmitOutcome deep = book.submit(Limit(3, Side::Sell, 102, 10));
+  REQUIRE(deep.rested_deep);
+  REQUIRE(book.find(3) == nullptr);
+  REQUIRE(book.has_deep(Side::Sell));
+  Ticks db = 0;
+  REQUIRE(book.deep_boundary(Side::Sell, &db));
+  REQUIRE(db == 102);
+
+  // A pull-back materializes the deep order directly, without matching.
+  Order pulled = Limit(3, Side::Sell, 102, 10);
+  pulled.leaves = 10;  // authoritative resting leaves from storage
+  book.insert_resident(pulled);
+  REQUIRE(book.find(3) != nullptr);
+  REQUIRE(book.total_qty_at(Side::Sell, 102) == 10);
+}
+
+TEST_CASE("An unbounded book (mem_levels 0) never rests deep", "[core][window]") {
+  OrderBook book;  // default: unbounded
+  for (Ticks p = 100; p >= 90; --p) {
+    const SubmitOutcome out = book.submit(Limit(static_cast<OrderId>(p),
+                                                Side::Buy, p, 1));
+    REQUIRE(out.rested);
+    REQUIRE_FALSE(out.rested_deep);
+  }
+  REQUIRE(book.resting_count() == 11);
+  REQUIRE_FALSE(book.has_deep(Side::Buy));
+}

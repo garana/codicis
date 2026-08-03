@@ -32,9 +32,13 @@ class MatchingEngine {
  public:
   /**
    * @brief Construct with a self-trade prevention policy for all books.
-   * @param stp The policy applied to every created book.
+   * @param stp        The policy applied to every created book.
+   * @param mem_levels Resident-window bound per side for every book
+   *                   (0 = unbounded).
    */
-  explicit MatchingEngine(StpPolicy stp = StpPolicy::kNone) : stp_(stp) {}
+  explicit MatchingEngine(StpPolicy stp = StpPolicy::kNone,
+                          std::size_t mem_levels = 0)
+      : stp_(stp), mem_levels_(mem_levels) {}
 
   /**
    * @brief Submit an order to a symbol's book (created on first use).
@@ -164,6 +168,7 @@ class MatchingEngine {
   const OrderBook* book_of(const Symbol& symbol) const;
 
   StpPolicy stp_;
+  std::size_t mem_levels_ = 0;
   std::unordered_map<Symbol, std::unique_ptr<OrderBook>> books_;
 };
 
