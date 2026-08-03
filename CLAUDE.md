@@ -355,9 +355,19 @@ Linux (CI/container) during hardening.
             and re-queue at the back of the level (time-priority loss); hidden
             orders match on their full reserve but contribute 0 to the public
             book. `displayed_qty_at` vs `total_qty_at` split the visible from
-            the matchable view. (Reduce-Only needs a position/risk layer and
-            Discretionary needs a hidden price band in matching -- both still
-            TODO within OT4.)
+            the matchable view.
+      - [x] OT4 discretionary: a discretionary order (kDiscretion +
+            `Order::discretion` band) displays/rests at its limit price but,
+            when it is the aggressor, reaches into the spread by the band -- a
+            buy takes up to price+discretion, a sell down to price-discretion --
+            trading at the maker price. The matcher widens the acceptance test
+            via `effective_limit()` (used in crosses/available_fill/match); the
+            resting remainder shows at the plain limit. Documented
+            simplification: the band is exercised only on entry, not re-applied
+            while resting (like pegs that do not auto-match). Reduce-Only is a
+            TODO (it needs
+            a position/risk layer). Core-only, like the other liquidity flags --
+            not yet exposed over REST.
       - [x] OT5 pegged: Primary (same-side best), Market (opposite-side best),
             and Midpoint pegs with a signed offset and protective cap. Pegs
             rest in the ladder (matchable) but their price derives from the
@@ -391,7 +401,8 @@ Linux (CI/container) during hardening.
             TODO: pull-levels-on-demand, which first needs top-of-book
             windowing (level eviction) -- currently the book holds all levels
             in memory, so there are no non-resident levels to pull.
-      - [ ] OT4 remainder (reduce-only, discretionary), OT7 auctions.
+      - [ ] OT4 remainder (reduce-only -- needs a position/risk layer),
+            OT7 auctions.
 - [~] Multi-symbol + market-data architecture (decided; see To Design):
       - [x] Per-symbol book registry: `MatchingEngine` (src/core) owns one
             OrderBook per Symbol, created on first use, routing submit/cancel/

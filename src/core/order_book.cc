@@ -221,6 +221,25 @@ struct OrderBook::Impl {
   /** @return The ladder for side s. */
   Ladder& ladder(Side s) { return s == Side::Buy ? bids : asks; }
 
+  /**
+   * @brief The most aggressive price @p o will take.
+   *
+   * A discretionary order displays at its limit price but is willing to reach
+   * into the spread by its discretion band when it is the aggressor: a buy will
+   * pay up to price+discretion, a sell will accept down to price-discretion.
+   * (The band is exercised on entry; the resting remainder shows at the plain
+   * limit -- a documented simplification, like pegs that do not auto-match.)
+   * @param o The order.
+   * @return o.price widened by the discretion band, or o.price if none.
+   */
+  Ticks effective_limit(const Order& o) const {
+    if (!HasFlag(o.flags, OrderFlag::kDiscretion) || o.discretion <= 0) {
+      return o.price;
+    }
+    return o.side == Side::Buy ? o.price + o.discretion
+                               : o.price - o.discretion;
+  }
+
   /** @return True if a marketable order o would cross the opposite side. */
   bool crosses(const Order& o) {
     Ladder& opp = ladder(Opposite(o.side));
@@ -231,7 +250,8 @@ struct OrderBook::Impl {
     if (o.type == OrdType::Market) {
       return true;
     }
-    return o.side == Side::Buy ? o.price >= bp : o.price <= bp;
+    const Ticks lim = effective_limit(o);
+    return o.side == Side::Buy ? lim >= bp : lim <= bp;
   }
 
   /**
@@ -247,11 +267,12 @@ struct OrderBook::Impl {
     if (!opp.has_base) {
       return 0;
     }
+    const Ticks lim = effective_limit(o);
     auto acceptable = [&](Ticks p) -> bool {
       if (o.type == OrdType::Market) {
         return true;
       }
-      return o.side == Side::Buy ? o.price >= p : o.price <= p;
+      return o.side == Side::Buy ? lim >= p : lim <= p;
     };
     if (opp.side == Side::Sell) {  // asks ascending: iterate low->high
       for (std::size_t i = 0; i < n && avail < o.leaves; ++i) {
@@ -401,11 +422,12 @@ struct OrderBook::Impl {
     if (!opp.has_base) {
       return false;
     }
+    const Ticks lim = effective_limit(o);
     auto acceptable = [&](Ticks p) {
       if (o.type == OrdType::Market) {
         return true;
       }
-      return o.side == Side::Buy ? o.price >= p : o.price <= p;
+      return o.side == Side::Buy ? lim >= p : lim <= p;
     };
     const std::size_t n = opp.levels.size();
     // Walk resident levels from best outward while the price still crosses. A

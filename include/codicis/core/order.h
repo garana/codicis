@@ -124,6 +124,7 @@ struct Order {
   Quantity filled = 0;      /**< Executed quantity (qty - leaves). */
   Quantity display_qty = 0; /**< Iceberg visible slice (== qty otherwise). */
   Quantity min_qty = 0;     /**< Minimum executable quantity (0 = none). */
+  Ticks discretion = 0;     /**< Discretionary band width (kDiscretion). */
 
   SeqNo seq = 0;            /**< Arrival order -> time priority. */
   Timestamp expiry_ns = 0;  /**< GTD/DAY expiry; 0 means no expiry. */

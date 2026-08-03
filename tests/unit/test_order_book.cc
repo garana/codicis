@@ -127,6 +127,15 @@ bool HasTaker(const SubmitOutcome& out, OrderId id) {
   return false;
 }
 
+/** @brief Build a discretionary limit order with a discretion band. */
+Order Discretionary(OrderId id, Side side, Ticks price, Quantity qty,
+                    Ticks band) {
+  Order o = Limit(id, side, price, qty);
+  SetFlag(&o.flags, OrderFlag::kDiscretion);
+  o.discretion = band;
+  return o;
+}
+
 }  // namespace
 
 TEST_CASE("Normalize collapses convenience TIFs", "[core][order]") {
@@ -624,4 +633,67 @@ TEST_CASE("Cancel removes a resting order and updates the top",
   REQUIRE(bid == 98);  // next level becomes best
   REQUIRE_FALSE(book.cancel(1));  // already gone
   REQUIRE(book.find(1) == nullptr);
+}
+
+TEST_CASE("Discretionary order reaches into the spread on entry",
+          "[core][discretion]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Sell, 101, 5));  // resting ask outside the limit
+
+  // A plain buy limit at 100 would not cross 101; the discretion band (to 102)
+  // lets this one lift the 101 ask, trading at the maker's price.
+  const SubmitOutcome out = book.submit(Discretionary(2, Side::Buy, 100, 5, 2));
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].price == 101);
+  REQUIRE(out.trades[0].qty == 5);
+  REQUIRE(out.trades[0].maker_id == 1);
+  REQUIRE(out.filled == 5);
+  REQUIRE_FALSE(out.rested);
+  REQUIRE(book.resting_count() == 0);
+}
+
+TEST_CASE("Discretionary band bounds how far it reaches", "[core][discretion]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Sell, 103, 5));  // ask beyond the band
+
+  // Band reaches only to 102, so 103 is untouched and the order rests at its
+  // displayed limit (100), not at the discretionary edge.
+  const SubmitOutcome out = book.submit(Discretionary(2, Side::Buy, 100, 5, 2));
+  REQUIRE(out.trades.empty());
+  REQUIRE(out.rested);
+  Ticks bid = 0;
+  REQUIRE(book.best_bid(&bid));
+  REQUIRE(bid == 100);
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 5);
+  REQUIRE(book.total_qty_at(Side::Buy, 102) == 0);
+}
+
+TEST_CASE("Discretionary remainder rests at the displayed limit",
+          "[core][discretion]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Sell, 101, 3));  // only part of the demand
+
+  const SubmitOutcome out = book.submit(Discretionary(2, Side::Buy, 100, 5, 2));
+  REQUIRE(out.filled == 3);
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].price == 101);
+  REQUIRE(out.rested);
+  Ticks bid = 0;
+  REQUIRE(book.best_bid(&bid));
+  REQUIRE(bid == 100);                                // displayed, not 101
+  REQUIRE(book.total_qty_at(Side::Buy, 100) == 2);    // leftover rests here
+  REQUIRE(book.total_qty_at(Side::Buy, 101) == 0);
+}
+
+TEST_CASE("Discretionary sell reaches down into the bid", "[core][discretion]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 99, 5));  // bid below the sell's limit
+
+  // Sell displayed at 100 with a 2-tick band accepts down to 98, so it hits the
+  // 99 bid at the maker's price.
+  const SubmitOutcome out = book.submit(Discretionary(2, Side::Sell, 100, 5, 2));
+  REQUIRE(out.trades.size() == 1);
+  REQUIRE(out.trades[0].price == 99);
+  REQUIRE(out.trades[0].qty == 5);
+  REQUIRE(out.filled == 5);
 }
