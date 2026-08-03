@@ -278,6 +278,75 @@ TEST_CASE("StorageClient works against the spawned reference helper",
   REQUIRE(committed);
   REQUIRE(storage.processed_pending() == 0);
 }
+
+TEST_CASE("Storage helper accumulates positions and answers pull_position",
+          "[ipc][spawn][position]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  Result<std::unique_ptr<HelperClient>> cr =
+      SpawnHelper(loop, {CODICIS_STORAGE_HELPER_PATH}, codec);
+  REQUIRE(cr.ok());
+  StorageClient storage(*cr.value());
+
+  const std::string alice = "aaaa1111-1111-4111-8111-111111111111";
+  const std::string bob = "bbbb2222-2222-4222-8222-222222222222";
+
+  auto pump = [&](const bool& done) {
+    for (int i = 0; i < 200 && !done; ++i) {
+      loop.run_once(5);
+    }
+  };
+
+  // Bob (seller, id 1) trades 10 against Alice (buyer, id 2): the helper learns
+  // each order's owner+side from report_order, then attributes the fills.
+  bool o1 = false, o2 = false;
+  storage.report_order(
+      {{"owner", bob}, {"id", "1"}, {"side", "sell"}, {"symbol", "BTC"}},
+      [&](bool ok) { o1 = ok; });
+  storage.report_order(
+      {{"owner", alice}, {"id", "2"}, {"side", "buy"}, {"symbol", "BTC"}},
+      [&](bool ok) { o2 = ok; });
+  pump(o2);
+  REQUIRE(o1);
+  REQUIRE(o2);
+
+  bool f1 = false, f2 = false;
+  storage.report_fill({{"id", "2"}, {"qty", "10"}, {"symbol", "BTC"}},
+                      [&](bool ok) { f1 = ok; });
+  storage.report_fill({{"id", "1"}, {"qty", "10"}, {"symbol", "BTC"}},
+                      [&](bool ok) { f2 = ok; });
+  pump(f2);
+  REQUIRE(f1);
+  REQUIRE(f2);
+
+  // Alice is now long 10, Bob short 10, and an untouched account is flat.
+  std::int64_t a_net = 0, b_net = 0, c_net = 999;
+  bool a_done = false, b_done = false, c_done = false;
+  storage.pull_position(alice, "BTC", [&](bool ok, std::int64_t net) {
+    a_net = net;
+    a_done = ok;
+  });
+  storage.pull_position(bob, "BTC", [&](bool ok, std::int64_t net) {
+    b_net = net;
+    b_done = ok;
+  });
+  storage.pull_position("cccc3333-3333-4333-8333-333333333333", "BTC",
+                        [&](bool ok, std::int64_t net) {
+                          c_net = net;
+                          c_done = ok;
+                        });
+  pump(c_done);
+  REQUIRE(a_done);
+  REQUIRE(b_done);
+  REQUIRE(c_done);
+  REQUIRE(a_net == 10);   // long
+  REQUIRE(b_net == -10);  // short
+  REQUIRE(c_net == 0);    // flat
+}
 #endif
 
 TEST_CASE("HelperClient times out a request with no response", "[ipc][timeout]") {

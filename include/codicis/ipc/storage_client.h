@@ -49,6 +49,13 @@ using CommitFn = std::function<void(bool ok, std::uint64_t watermark)>;
 using PullFn = std::function<void(bool ok, const HelperMessage& reply)>;
 
 /**
+ * @brief Callback for a position pull.
+ * @param ok  True if the query succeeded.
+ * @param net The account's net position for the symbol (+long / -short).
+ */
+using PositionFn = std::function<void(bool ok, std::int64_t net)>;
+
+/**
  * @brief Storage-protocol client with an outbox and commit watermark.
  */
 class StorageClient {
@@ -102,6 +109,19 @@ class StorageClient {
    */
   void pull_levels(const std::string& symbol, const std::string& side,
                    std::int64_t from_price, std::int64_t count, PullFn cb);
+
+  /**
+   * @brief Pull an account's net position for a symbol from storage.
+   *
+   * Storage is the system of record for positions (derived from the reported
+   * fill stream), so this returns the durable, authoritative net -- used to
+   * seed the in-memory book for reduce-only clamping.
+   * @param user   The owning user's UUID.
+   * @param symbol The instrument symbol.
+   * @param cb     Completion callback.
+   */
+  void pull_position(const std::string& user, const std::string& symbol,
+                     PositionFn cb);
 
   /** @return The number of reported entries not yet committed. */
   std::size_t processed_pending() const { return outbox_.size(); }

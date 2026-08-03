@@ -124,20 +124,16 @@ This file (Progress + To Design) is the durable project record. The plan file
   intentionally deferred.
 - **Additional helper types.** Trade reporter, last-known-price reporter, etc.,
   added later on the same `Helper`/`HelperCodec` framework.
-- **Client positions from the storage helper (reduce-only durability).** Today
-  the OrderBook derives per-client net positions purely in-memory from fills
-  seen since process start, so reduce-only clamps against a non-durable,
-  non-authoritative position (wrong after a restart). The storage helper is the
-  system of record -- every fill is already `report_fill`'d to it -- so it can
-  own positions. Add a `pull_position(user_uuid, symbol) -> net` message (a
-  read, so it belongs on the separate reader `HelperClient` alongside
-  `pull_levels`); the engine pulls a client's position on first touch (or at
-  startup), seeds the book's map (keyed by the internal client_id that
-  `client_for(user_uuid)` assigns), then keeps applying live fills. Because the
-  pull is async and the matcher must not block, a reduce-only order parks until
-  its position arrives and resumes in arrival-seq order -- the SAME park/resume
-  machinery as pull-levels-on-demand below, so build the two together. Until
-  then, reduce-only is correct only within a single from-flat process run.
+- **Client positions from the storage helper (reduce-only durability) -- DONE,
+  except the reader-connection split.** Implemented: `report_order` carries
+  `owner`; the helper maintains per-(owner,symbol) net from the reported fill
+  stream and answers `pull_position(user_uuid, symbol) -> net`; the engine pulls
+  on a client's first order for a symbol, seeds the book (keyed by the
+  client_id `client_for` assigns), and parks placement until the pull returns
+  (`pos_ready` gate; per-account coalescing). REMAINING: the pull currently
+  shares the writer's storage connection -- move it onto the separate reader
+  `HelperClient` (see the item below) so a slow write ack can't delay a
+  position read, and so it composes with pull-levels-on-demand's park/resume.
 - **Separate reader helper for pull-levels-on-demand.** Use a second
   `HelperClient` instance (same class/framework as the writer) for pulling
   non-resident levels, distinct from the writer/committer connection.
@@ -390,13 +386,31 @@ Linux (CI/container) during hardening.
             reduce-only orders can never together flip the position. Wrong-side
             or zero position rejects. The position map lives in the OrderBook
             (per symbol); a fuller cross-symbol/margin risk layer would sit
-            above it. Core-only (not yet exposed over REST). LIMITATION:
-            positions are IN-MEMORY ONLY, built from fills seen since process
-            start (from zero) -- they are NOT pulled from the storage helper, so
-            they do not survive a restart and are not authoritative. The account
-            is the user uuid, mapped by the engine to the internal client_id
+            above it. Core-only (not yet exposed over REST). The account is the
+            user uuid, mapped by the engine to the internal client_id
             (client_for); anonymous (empty uuid -> client_id 0) cannot be
-            reduce-only. Pulling/persisting positions is a To Design item below.
+            reduce-only. Positions are now DURABLE: seeded from the storage
+            helper (see the position-persistence progress item below), not just
+            session-accumulated.
+      - [x] Position persistence via the storage helper (durable reduce-only):
+            the storage helper is the system of record. `report_order` now
+            carries `owner`; the reference helper remembers each order's
+            owner+side and, on each `report_fill`, updates a per-(owner,symbol)
+            net; a new `pull_position(user, symbol) -> net` returns it. The
+            TradingEngine pulls a client's position on its FIRST order for a
+            symbol (via `ensure_position`) -- when the client has no book
+            presence, so no fill can race the seed -- seeds the book
+            (`MatchingEngine::seed_position`), and PARKS placement until the
+            pull returns (a new `pos_ready` gate on the report-before-place
+            staging; concurrent orders for the same account coalesce onto the
+            one in-flight pull). On pull failure the book stays flat
+            (reduce-only then conservatively finds nothing to reduce). Tested at
+            the helper level (report_order/fill -> pull_position round-trip over
+            the spawned reference helper) and the engine level (a pulled long
+            caps an
+            oversized reduce-only). NB: the pull shares the writer's storage
+            connection for now -- moving it to a separate reader HelperClient is
+            still the To Design optimization below.
       - [x] OT5 pegged: Primary (same-side best), Market (opposite-side best),
             and Midpoint pegs with a signed offset and protective cap. Pegs
             rest in the ladder (matchable) but their price derives from the

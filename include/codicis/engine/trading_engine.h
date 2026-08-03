@@ -26,8 +26,10 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "codicis/core/matching_engine.h"
 #include "codicis/core/order.h"
@@ -137,12 +139,30 @@ class TradingEngine {
     std::string order_uuid;
     Order order;
     SubmitCallback cb;
-    bool acked = false;
-    bool ok = false;
+    ClientId client_id = 0;   /**< Owner's client id (0 = anonymous). */
+    bool acked = false;       /**< Storage acknowledged the pre-report. */
+    bool ok = false;          /**< The pre-report succeeded. */
+    bool pos_ready = false;   /**< The account's position is loaded. */
   };
 
   /** @brief Place all acknowledged orders that are next in sequence. */
   void drain();
+
+  /**
+   * @brief Ensure @p client's position for @p symbol is loaded from storage.
+   *
+   * On the account's first order for a symbol (when it has no book presence, so
+   * no fill can race the seed) this pulls the authoritative net position from
+   * the storage helper and seeds the book, then marks every pending order for
+   * that account ready and drains. A no-op (returns ready) for an already
+   * loaded account or an anonymous (client 0) order.
+   * @param symbol The instrument.
+   * @param owner  The owning user's UUID (for the storage query).
+   * @param client The account (client id).
+   * @return True if the position is already available (no pull needed).
+   */
+  bool ensure_position(const Symbol& symbol, const std::string& owner,
+                       ClientId client);
 
   /** @brief Report an order's resulting trades and fills to storage. */
   void report_results(const Symbol& symbol, const Order& taker,
@@ -162,6 +182,11 @@ class TradingEngine {
   std::unordered_map<std::string, Handle> handles_;   // order uuid -> handle
   std::unordered_map<OrderId, std::string> id_uuid_;  // internal id -> uuid
   std::unordered_map<std::string, ClientId> user_client_;  // owner -> client id
+
+  // Per-account position load state, keyed by (symbol, client id): loaded once
+  // the storage position is seeded; loading while a pull is in flight.
+  std::set<std::pair<Symbol, ClientId>> position_loaded_;
+  std::set<std::pair<Symbol, ClientId>> position_loading_;
 
   SeqNo next_assign_seq_ = 1;
   SeqNo next_place_seq_ = 1;

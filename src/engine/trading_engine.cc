@@ -19,8 +19,9 @@ const char* SideName(Side s) { return s == Side::Buy ? "buy" : "sell"; }
 
 /** @brief Build the persisted fields for a new order. */
 std::vector<std::pair<std::string, std::string>> OrderFields(
-    const Symbol& symbol, const Order& o) {
+    const Symbol& symbol, const std::string& owner, const Order& o) {
   return {{"symbol", symbol},
+          {"owner", owner},  // lets storage attribute fills to an account
           {"id", std::to_string(o.id)},
           {"side", SideName(o.side)},
           {"price", std::to_string(o.price)},
@@ -48,7 +49,8 @@ std::string TradingEngine::submit(const Symbol& symbol,
   if (order.id == 0) {
     order.id = next_order_id_++;
   }
-  order.client_id = client_for(owner);
+  const ClientId client_id = client_for(owner);
+  order.client_id = client_id;
   const std::string order_uuid = uuids_.generate_string();
   const SeqNo seq = next_assign_seq_++;
 
@@ -58,10 +60,16 @@ std::string TradingEngine::submit(const Symbol& symbol,
   p.order_uuid = order_uuid;
   p.order = order;
   p.cb = std::move(cb);
+  p.client_id = client_id;
+  // Placement waits on the account's position being loaded from storage (so
+  // reduce-only clamps against the durable position). ensure_position() pulls
+  // it on the account's first order for the symbol; it is already available for
+  // anonymous or previously-loaded accounts.
+  p.pos_ready = ensure_position(symbol, owner, client_id);
   pending_.emplace(seq, std::move(p));
 
   // Report-before-place: only place once storage has acknowledged.
-  storage_.report_order(OrderFields(symbol, order), [this, seq](bool ok) {
+  storage_.report_order(OrderFields(symbol, owner, order), [this, seq](bool ok) {
     const auto it = pending_.find(seq);
     if (it == pending_.end()) {
       return;
@@ -71,6 +79,41 @@ std::string TradingEngine::submit(const Symbol& symbol,
     drain();
   });
   return order_uuid;
+}
+
+bool TradingEngine::ensure_position(const Symbol& symbol,
+                                    const std::string& owner, ClientId client) {
+  if (client == 0) {
+    return true;  // anonymous: no position, nothing to load
+  }
+  const std::pair<Symbol, ClientId> key{symbol, client};
+  if (position_loaded_.count(key) > 0) {
+    return true;  // already seeded this session
+  }
+  if (position_loading_.count(key) > 0) {
+    return false;  // a pull is already in flight; coalesce onto it
+  }
+  position_loading_.insert(key);
+  // The account has no book presence before its first order places, so no fill
+  // can change its position while this async pull is outstanding.
+  storage_.pull_position(
+      owner, symbol, [this, symbol, client](bool ok, std::int64_t net) {
+        if (ok) {
+          matching_.seed_position(symbol, client, net);
+        }
+        // Either way, stop gating on the pull: on failure the book stays flat
+        // (reduce-only then conservatively finds nothing to reduce).
+        const std::pair<Symbol, ClientId> k{symbol, client};
+        position_loading_.erase(k);
+        position_loaded_.insert(k);
+        for (auto& [seq, pend] : pending_) {
+          if (pend.client_id == client && pend.symbol == symbol) {
+            pend.pos_ready = true;
+          }
+        }
+        drain();
+      });
+  return false;
 }
 
 CancelResult TradingEngine::cancel(const std::string& order_uuid,
@@ -94,10 +137,11 @@ CancelResult TradingEngine::cancel(const std::string& order_uuid,
 
 void TradingEngine::drain() {
   // Place acknowledged orders strictly in arrival order, so out-of-order acks
-  // never reorder book placement.
+  // never reorder book placement. An order also waits until its account's
+  // position has been loaded from storage (pos_ready).
   for (;;) {
     const auto it = pending_.find(next_place_seq_);
-    if (it == pending_.end() || !it->second.acked) {
+    if (it == pending_.end() || !it->second.acked || !it->second.pos_ready) {
       break;
     }
     Pending p = std::move(it->second);

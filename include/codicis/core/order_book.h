@@ -163,6 +163,25 @@ class OrderBook {
   /** @return The number of stop/trailing orders awaiting a trigger. */
   std::size_t pending_stop_count() const;
 
+  /**
+   * @brief Seed an account's net position (for reduce-only clamping).
+   *
+   * Sets the client's net position outright, used to load the authoritative
+   * position from storage before the client's first order is placed (when it
+   * has no book presence, so no fills can race the seed). A positive value is
+   * long, negative is short. Anonymous (client 0) is ignored.
+   * @param client The account (client id).
+   * @param net    The net position to set.
+   */
+  void seed_position(ClientId client, Quantity net);
+
+  /**
+   * @brief Get an account's current net position (+long / -short).
+   * @param client The account (client id).
+   * @return The net position, or 0 if the account is unknown.
+   */
+  Quantity position(ClientId client) const;
+
  private:
   /**
    * @brief React to fills of contingent (OCO/OTO/bracket) orders.

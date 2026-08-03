@@ -75,4 +75,14 @@ std::vector<OrderId> MatchingEngine::expire(const Symbol& symbol,
   return it->second->expire(now);
 }
 
+void MatchingEngine::seed_position(const Symbol& symbol, ClientId client,
+                                   Quantity net) {
+  book_for(symbol).seed_position(client, net);
+}
+
+Quantity MatchingEngine::position(const Symbol& symbol, ClientId client) const {
+  const OrderBook* book = book_of(symbol);
+  return book == nullptr ? 0 : book->position(client);
+}
+
 }  // namespace codicis

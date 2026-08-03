@@ -55,12 +55,8 @@ struct TestHelper {
     return out;
   }
 
-  /** @brief Acknowledge a request by echoing its id with status ok. */
-  void ack(std::uint64_t req_id, const std::string& type) {
-    HelperMessage resp;
-    resp.req_id = req_id;
-    resp.type = type;
-    resp.set("status", "ok");
+  /** @brief Write an encoded response to the client end. */
+  void write_msg(const HelperMessage& resp) {
     std::string bytes;
     codec.encode(resp, &bytes);
     std::size_t off = 0;
@@ -70,6 +66,38 @@ struct TestHelper {
         off += static_cast<std::size_t>(n);
       } else {
         break;
+      }
+    }
+  }
+
+  /** @brief Acknowledge a request by echoing its id with status ok. */
+  void ack(std::uint64_t req_id, const std::string& type) {
+    HelperMessage resp;
+    resp.req_id = req_id;
+    resp.type = type;
+    resp.set("status", "ok");
+    write_msg(resp);
+  }
+
+  /** @brief Answer a pull_position request with a net position. */
+  void reply_position(std::uint64_t req_id, std::int64_t net) {
+    HelperMessage resp;
+    resp.req_id = req_id;
+    resp.type = "position";
+    resp.set("net", std::to_string(net));
+    write_msg(resp);
+  }
+
+  /**
+   * @brief Ack every buffered report_order and answer every pull_position.
+   * @param net The net position to report for any pull_position.
+   */
+  void serve(std::int64_t net) {
+    for (const HelperMessage& m : read_requests()) {
+      if (m.type == "report_order") {
+        ack(m.req_id, "report_order");
+      } else if (m.type == "pull_position") {
+        reply_position(m.req_id, net);
       }
     }
   }
@@ -297,11 +325,12 @@ TEST_CASE("Owner may cancel by handle; a non-owner may not", "[engine][auth]") {
   const std::string handle =
       engine.submit("BTC", alice, Limit(Side::Buy, 100, 5), nullptr);
   REQUIRE(IsValidUuidString(handle));
-  for (const HelperMessage& m : helper.read_requests()) {
-    if (m.type == "report_order") helper.ack(m.req_id, "report_order");
-  }
+  // The engine pulls alice's position (first order) and reports the order;
+  // answer both so it can place. Alice starts flat.
+  helper.serve(/*net=*/0);
   for (int i = 0; i < 20 && engine.pending_placements() > 0; ++i) {
     loop.run_once(2);
+    helper.serve(0);
   }
   REQUIRE(matching.resting_count("BTC") == 1);
 
@@ -321,6 +350,51 @@ TEST_CASE("Owner may cancel by handle; a non-owner may not", "[engine][auth]") {
 
   // The handle is gone after a successful cancel.
   REQUIRE(engine.cancel(handle, alice) == CancelResult::kNotFound);
+
+  ::close(sp[1]);
+}
+
+TEST_CASE("A position pulled from storage caps a reduce-only order",
+          "[engine][reduceonly]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  StorageClient storage(client);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
+  TestHelper helper{.fd = sp[1], .codec = codec, .in = {}};
+
+  const std::string carol = "33333333-3333-4333-8333-333333333333";
+
+  // Carol has no book presence this session, but storage says she is long 10.
+  // A reduce-only sell of 15 must be capped to that pulled position.
+  Order ro = Limit(Side::Sell, 100, 15);
+  SetFlag(&ro.flags, OrderFlag::kReduceOnly);
+  TradingEngine::Result result;
+  bool done = false;
+  engine.submit("BTC", carol, ro, [&](const TradingEngine::Result& r) {
+    result = r;
+    done = true;
+  });
+  helper.serve(/*net=*/10);  // ack the report + answer the position pull (long 10)
+  for (int i = 0; i < 40 && !done; ++i) {
+    loop.run_once(2);
+    helper.serve(10);
+  }
+  REQUIRE(done);
+  REQUIRE(result.storage_ok);
+  REQUIRE(result.outcome.accepted);
+  REQUIRE(result.outcome.rested);
+
+  const Order* placed = matching.find("BTC", result.order_id);
+  REQUIRE(placed != nullptr);
+  REQUIRE(placed->leaves == 10);  // capped to the pulled long, not the 15 asked
 
   ::close(sp[1]);
 }

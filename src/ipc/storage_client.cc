@@ -89,4 +89,35 @@ void StorageClient::pull_levels(const std::string& symbol,
                });
 }
 
+void StorageClient::pull_position(const std::string& user,
+                                  const std::string& symbol, PositionFn cb) {
+  helper_.send("pull_position", {{"user", user}, {"symbol", symbol}},
+               [cb = std::move(cb)](bool ok, const HelperMessage& reply) {
+                 std::int64_t net = 0;
+                 if (ok) {
+                   if (const std::string* s = reply.get("net")) {
+                     bool neg = false;
+                     std::size_t i = 0;
+                     if (!s->empty() && ((*s)[0] == '-' || (*s)[0] == '+')) {
+                       neg = (*s)[0] == '-';
+                       i = 1;
+                     }
+                     for (; i < s->size(); ++i) {
+                       const char c = (*s)[i];
+                       if (c < '0' || c > '9') {
+                         break;
+                       }
+                       net = net * 10 + (c - '0');
+                     }
+                     if (neg) {
+                       net = -net;
+                     }
+                   }
+                 }
+                 if (cb) {
+                   cb(ok, net);
+                 }
+               });
+}
+
 }  // namespace codicis

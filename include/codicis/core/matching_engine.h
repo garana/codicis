@@ -110,6 +110,22 @@ class MatchingEngine {
    */
   std::size_t resting_count(const Symbol& symbol) const;
 
+  /**
+   * @brief Seed an account's net position in a symbol's book.
+   * @param symbol The instrument (book created on first use).
+   * @param client The account (client id).
+   * @param net    The net position to set (+long / -short).
+   */
+  void seed_position(const Symbol& symbol, ClientId client, Quantity net);
+
+  /**
+   * @brief An account's net position in a symbol's book.
+   * @param symbol The instrument.
+   * @param client The account (client id).
+   * @return The net position (0 for an unknown symbol or account).
+   */
+  Quantity position(const Symbol& symbol, ClientId client) const;
+
   /** @return Whether a book exists for the symbol. */
   bool has_symbol(const Symbol& symbol) const {
     return books_.find(symbol) != books_.end();

@@ -1144,6 +1144,18 @@ bool OrderBook::last_trade_price(Ticks* out) const {
   return true;
 }
 
+void OrderBook::seed_position(ClientId client, Quantity net) {
+  if (client == 0) {
+    return;
+  }
+  impl_->positions[client].net = net;
+}
+
+Quantity OrderBook::position(ClientId client) const {
+  const auto it = impl_->positions.find(client);
+  return it == impl_->positions.end() ? 0 : it->second.net;
+}
+
 std::size_t OrderBook::resting_count() const { return impl_->orders.size(); }
 
 std::size_t OrderBook::pending_stop_count() const {
