@@ -27,6 +27,38 @@ OptionRegistry BuildOptionRegistry() {
                     "Per-request storage helper timeout in ms (0 disables)");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
+
+  // Authentication (identity of the requesting user). Two independent,
+  // non-exclusive mechanisms; when both are on, both must pass and agree.
+  // Option A: trust a user UUID in a header set by an authenticating edge.
+  reg.add_bool("auth.header.enabled", false,
+               "Trust a pre-authenticated user UUID from a request header");
+  reg.add_string("auth.header.name", "X-User-Id",
+                 "Request header carrying the pre-authenticated user UUID");
+  // Option B: validate a credential header via a helper process pool.
+  reg.add_bool("auth.helper.enabled", false,
+               "Validate a credential header via an auth helper process");
+  reg.add_string("auth.helper.cmd", "./codicis_auth_helper",
+                 "Command used to launch the auth helper child process(es)");
+  reg.add_int_range("auth.helper.concurrency", 1, 1, 1024,
+                    "Number of concurrent auth helper processes (pool size)");
+  reg.add_bool("auth.helper.pipelining", true,
+               "Whether the auth helper accepts overlapping in-flight requests");
+  reg.add_int_range("auth.helper.pipeline_depth", 8, 1, 65536,
+                    "Max in-flight requests per helper (forced to 1 if no "
+                    "pipelining)");
+  reg.add_string("auth.helper.credential_header", "Authorization",
+                 "Request header whose value is forwarded to the auth helper");
+  reg.add_int_range("auth.helper.request_timeout_ms", 5000, 0, 3'600'000,
+                    "Per-request auth helper timeout in ms (0 disables)");
+  reg.add_int_range("auth.cache.max_entries", 4096, 0, 100'000'000,
+                    "Positive auth cache capacity (validated credentials)");
+  reg.add_int_range("auth.cache.ttl_ms", 60'000, 0, 3'600'000,
+                    "Positive auth cache entry lifetime in ms");
+  reg.add_int_range("auth.cache.negative_max_entries", 1024, 0, 100'000'000,
+                    "Negative auth cache capacity (rejected credentials)");
+  reg.add_int_range("auth.cache.negative_ttl_ms", 5000, 0, 3'600'000,
+                    "Negative auth cache entry lifetime in ms (keep short)");
   return reg;
 }
 

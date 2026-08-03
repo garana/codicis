@@ -14,4 +14,9 @@ Nanos SystemClock::now() const {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(t).count();
 }
 
+Nanos WallClock::now() const {
+  const auto t = std::chrono::system_clock::now().time_since_epoch();
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(t).count();
+}
+
 }  // namespace codicis

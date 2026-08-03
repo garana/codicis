@@ -40,6 +40,19 @@ class SystemClock final : public Clock {
 };
 
 /**
+ * @brief A @ref Clock backed by the system wall clock (Unix epoch).
+ *
+ * Unlike @ref SystemClock (monotonic), this returns nanoseconds since the Unix
+ * epoch, so it can be compared against absolute timestamps received from other
+ * systems (e.g. an auth helper's `not_after`). Not for time-priority or
+ * interval timing (it can jump); use it only for absolute expiry comparisons.
+ */
+class WallClock final : public Clock {
+ public:
+  Nanos now() const override;
+};
+
+/**
  * @brief A @ref Clock whose value is controlled explicitly, for tests.
  */
 class ManualClock final : public Clock {
