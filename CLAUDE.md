@@ -459,12 +459,33 @@ Linux (CI/container) during hardening.
                   primitive). mem_levels defaults to 0 (unbounded) and is not
                   yet wired into AppServer -- production stays unbounded until
                   Phase 3 adds the engine cooperation.
-            - [ ] Phase 3: async pull-back in the engine (ensure_depth pulls
-                  deep contra levels before an aggressor reaches them;
-                  park/resume;
-                  cold-start warmup pulls top-N per side; deep-order cancel via
-                  report_cancel; separate reader HelperClient; report_rest on
-                  rest; wire mem_levels into AppServer).
+            - [x] Phase 3: async pull-back in the engine. On rest (resident or
+                  deep) the engine report_rest's the order + registers a handle
+                  (deep orders are cancellable); cancel does report_cancel +
+                  matching_.cancel (no-op if deep). In drain, ensure_depth
+                  gates
+                  the head order: on a symbol's first order it warms the top N
+                  per side (pull_levels buy from INT64_MAX, sell from
+                  INT64_MIN);
+                  and it pulls the deep contra levels a crossing aggressor would
+                  reach (needs_deep: has_deep(contra) && the limit crosses
+                  past
+                  the worst resident contra), insert_resident's them, and
+                  resumes draining -- chaining pulls until covered. mem_levels
+                  is wired from config.book.mem_levels into MatchingEngine +
+                  TradingEngine.
+                  Race: a cancel while a pull is in flight adds the id to
+                  pull_ignore_ so on_pull does not resurrect it (cancel wins).
+                  Verified: test_app pulls a deep level an aggressor reaches and
+                  fills it; live smoke pulls two deep levels. LIMITATIONS
+                  (noted,
+                  follow-ons): pulls share the writer storage connection (the
+                  separate reader HelperClient is still deferred); PulledOrder
+                  carries no client_id, so a pulled-back order loses
+                  STP/position
+                  attribution in memory (storage positions stay correct via
+                  report_fill); handles are in-memory, so after a restart pulled
+                  orders match but are not cancellable by their old uuid.
       - [x] OT7 auctions (MOO/LOO/MOC/LOC/OPG): auction-flagged orders are
             queued into a per-book opening or closing auction rather than
             trading continuously. `run_opening_auction`/`run_closing_auction`

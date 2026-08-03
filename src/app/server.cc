@@ -270,7 +270,11 @@ std::string BookTopFields(const MatchingEngine& engine, const Symbol& symbol) {
 }  // namespace
 
 AppServer::AppServer(EventLoop& loop, const Config& config)
-    : loop_(loop), config_(config) {}
+    : loop_(loop),
+      config_(config),
+      mem_levels_(static_cast<std::size_t>(
+          config.get_int("book.mem_levels").value())),
+      matching_(StpPolicy::kNone, mem_levels_) {}
 
 AppServer::~AppServer() {
   if (commit_timer_ != 0) {
@@ -300,7 +304,7 @@ Status AppServer::start() {
   }
   helper_ = std::move(hr.value());
   storage_ = std::make_unique<StorageClient>(*helper_);
-  engine_ = std::make_unique<TradingEngine>(matching_, *storage_);
+  engine_ = std::make_unique<TradingEngine>(matching_, *storage_, mem_levels_);
 
   // Authentication: Option A (trusted header) and/or Option B (helper pool).
   auth_header_enabled_ = config_.get_bool("auth.header.enabled").value();

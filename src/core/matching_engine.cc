@@ -99,4 +99,19 @@ std::size_t MatchingEngine::auction_count(const Symbol& symbol,
   return book == nullptr ? 0 : book->auction_count(opening);
 }
 
+void MatchingEngine::insert_resident(const Symbol& symbol, const Order& order) {
+  book_for(symbol).insert_resident(order);
+}
+
+bool MatchingEngine::has_deep(const Symbol& symbol, Side side) const {
+  const OrderBook* book = book_of(symbol);
+  return book != nullptr && book->has_deep(side);
+}
+
+bool MatchingEngine::worst_resident(const Symbol& symbol, Side side,
+                                    Ticks* out) const {
+  const OrderBook* book = book_of(symbol);
+  return book != nullptr && book->worst_resident(side, out);
+}
+
 }  // namespace codicis

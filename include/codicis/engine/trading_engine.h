@@ -73,11 +73,15 @@ class TradingEngine {
   /**
    * @brief Construct over a matching engine and storage client (both must
    *        outlive it).
-   * @param matching The per-symbol matching engine.
-   * @param storage  The storage helper client.
+   * @param matching   The per-symbol matching engine.
+   * @param storage    The storage helper client.
+   * @param mem_levels The resident-window bound per side (0 = unbounded, no
+   *                   pull-back). Must match the value the matching engine's
+   *                   books use; it is the pull batch size and warmup depth.
    */
-  TradingEngine(MatchingEngine& matching, StorageClient& storage)
-      : matching_(matching), storage_(storage) {}
+  TradingEngine(MatchingEngine& matching, StorageClient& storage,
+                std::size_t mem_levels = 0)
+      : matching_(matching), storage_(storage), mem_levels_(mem_levels) {}
 
   /**
    * @brief Submit an order to a symbol on behalf of an owner.
@@ -195,6 +199,28 @@ class TradingEngine {
   /** @return The internal client id for an owner (0 for anonymous). */
   ClientId client_for(const std::string& owner);
 
+  /**
+   * @brief Ensure the resident window covers the head order before it places.
+   *
+   * With a bounded window, warms a symbol's top levels on first touch and pulls
+   * the deep contra levels a crossing aggressor would reach, materializing them
+   * so the synchronous matcher can see them. Issues async pulls and returns
+   * false (the order stays parked) until the window covers it; the pull
+   * completion resumes draining. Returns true immediately when unbounded or
+   * already covered.
+   * @param symbol The instrument.
+   * @param order  The head order about to be placed.
+   * @return True if the order may place now; false if a pull was issued.
+   */
+  bool ensure_depth(const Symbol& symbol, const Order& order);
+
+  /** @brief Handle a pulled batch of deep orders for @p symbol on @p side. */
+  void on_pull(const Symbol& symbol, Side side,
+               std::vector<PulledOrder> orders);
+
+  /** @return True if @p order would cross beyond the resident contra window. */
+  bool needs_deep(const Symbol& symbol, const Order& order, Side contra) const;
+
   MatchingEngine& matching_;
   StorageClient& storage_;
   UuidGenerator uuids_;
@@ -208,6 +234,14 @@ class TradingEngine {
   // the storage position is seeded; loading while a pull is in flight.
   std::set<std::pair<Symbol, ClientId>> position_loaded_;
   std::set<std::pair<Symbol, ClientId>> position_loading_;
+
+  // Deep-level windowing (OT8). mem_levels_ == 0 disables it (unbounded books).
+  std::size_t mem_levels_ = 0;
+  std::set<Symbol> warmed_;         // symbols whose top-of-book was warmed
+  int depth_pulls_ = 0;             // outstanding pull_levels requests
+  // Orders cancelled while a pull was in flight: skip re-materializing them
+  // from the (possibly stale) pull snapshot -- the cancel wins the race.
+  std::set<OrderId> pull_ignore_;
 
   SeqNo next_assign_seq_ = 1;
   SeqNo next_place_seq_ = 1;

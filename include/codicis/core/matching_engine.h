@@ -152,6 +152,30 @@ class MatchingEngine {
    */
   std::size_t auction_count(const Symbol& symbol, bool opening) const;
 
+  /**
+   * @brief Materialize a pulled-back resting order into a symbol's book.
+   * @param symbol The instrument (book created on first use).
+   * @param order  The resting order (from storage) to insert without matching.
+   */
+  void insert_resident(const Symbol& symbol, const Order& order);
+
+  /**
+   * @brief Whether deep (non-resident) liquidity exists on a symbol's side.
+   * @param symbol The instrument.
+   * @param side   The book side.
+   * @return True if there are deep orders on that side.
+   */
+  bool has_deep(const Symbol& symbol, Side side) const;
+
+  /**
+   * @brief The worst (farthest-from-top) resident price on a symbol's side.
+   * @param symbol The instrument.
+   * @param side   The book side.
+   * @param out    Receives the price on success.
+   * @return True if that side has any resident order.
+   */
+  bool worst_resident(const Symbol& symbol, Side side, Ticks* out) const;
+
   /** @return Whether a book exists for the symbol. */
   bool has_symbol(const Symbol& symbol) const {
     return books_.find(symbol) != books_.end();

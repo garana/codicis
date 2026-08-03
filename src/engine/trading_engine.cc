@@ -5,9 +5,11 @@
 
 #include "codicis/engine/trading_engine.h"
 
+#include <limits>
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "codicis/util/logging.h"
 
@@ -116,6 +118,99 @@ bool TradingEngine::ensure_position(const Symbol& symbol,
   return false;
 }
 
+bool TradingEngine::needs_deep(const Symbol& symbol, const Order& order,
+                               Side contra) const {
+  if (!matching_.has_deep(symbol, contra)) {
+    return false;
+  }
+  Ticks worst = 0;
+  if (!matching_.worst_resident(symbol, contra, &worst)) {
+    return true;  // no resident contra levels, but deep liquidity exists
+  }
+  if (order.type == OrdType::Market) {
+    return true;  // a market order reaches as far as its quantity needs
+  }
+  // A limit reaches deep only if it crosses past the deepest resident contra.
+  return order.side == Side::Buy ? order.price > worst : order.price < worst;
+}
+
+bool TradingEngine::ensure_depth(const Symbol& symbol, const Order& order) {
+  if (mem_levels_ == 0) {
+    return true;  // unbounded books hold everything; no pull-back
+  }
+  if (depth_pulls_ > 0) {
+    return false;  // a pull is in flight; keep the head order parked
+  }
+  const auto batch = static_cast<std::int64_t>(mem_levels_);
+  constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+  constexpr std::int64_t kMin = std::numeric_limits<std::int64_t>::min();
+
+  // Warm the top of book on the first order for a symbol (both sides), so the
+  // resident window reflects storage before anything rests or matches.
+  if (warmed_.find(symbol) == warmed_.end()) {
+    warmed_.insert(symbol);
+    depth_pulls_ += 2;
+    storage_.pull_levels(symbol, "buy", kMax, batch,
+                         [this, symbol](bool ok, std::vector<PulledOrder> os) {
+                           on_pull(symbol, Side::Buy,
+                                   ok ? std::move(os)
+                                      : std::vector<PulledOrder>{});
+                         });
+    storage_.pull_levels(symbol, "sell", kMin, batch,
+                         [this, symbol](bool ok, std::vector<PulledOrder> os) {
+                           on_pull(symbol, Side::Sell,
+                                   ok ? std::move(os)
+                                      : std::vector<PulledOrder>{});
+                         });
+    return false;
+  }
+
+  // Pull the deep contra levels a crossing aggressor would reach.
+  const Side contra = Opposite(order.side);
+  if (needs_deep(symbol, order, contra)) {
+    Ticks worst = 0;
+    const std::int64_t from =
+        matching_.worst_resident(symbol, contra, &worst)
+            ? worst
+            : (contra == Side::Sell ? kMin : kMax);
+    depth_pulls_ += 1;
+    storage_.pull_levels(symbol, SideName(contra), from, batch,
+                         [this, symbol, contra](
+                             bool ok, std::vector<PulledOrder> os) {
+                           on_pull(symbol, contra,
+                                   ok ? std::move(os)
+                                      : std::vector<PulledOrder>{});
+                         });
+    return false;
+  }
+  return true;
+}
+
+void TradingEngine::on_pull(const Symbol& symbol, Side side,
+                            std::vector<PulledOrder> orders) {
+  for (const PulledOrder& po : orders) {
+    if (pull_ignore_.count(po.id) > 0) {
+      continue;  // cancelled while this pull was in flight
+    }
+    if (matching_.find(symbol, po.id) != nullptr) {
+      continue;  // already resident (pulled by an earlier batch)
+    }
+    Order o;
+    o.id = po.id;
+    o.side = side;
+    o.type = OrdType::Limit;
+    o.price = po.price;
+    o.qty = po.leaves;
+    o.leaves = po.leaves;
+    o.seq = po.seq;
+    matching_.insert_resident(symbol, o);
+  }
+  if (--depth_pulls_ == 0) {
+    pull_ignore_.clear();
+    drain();
+  }
+}
+
 CancelResult TradingEngine::cancel(const std::string& order_uuid,
                                    const std::string& requester,
                                    Symbol* symbol_out) {
@@ -135,6 +230,11 @@ CancelResult TradingEngine::cancel(const std::string& order_uuid,
   // storage resting book (authoritative for deep orders that are not in memory).
   matching_.cancel(symbol, id);
   storage_.report_cancel(symbol, id, nullptr);
+  // Race: if a deep pull is in flight it may carry a now-stale snapshot that
+  // still contains this order; mark it so on_pull does not resurrect it.
+  if (depth_pulls_ > 0) {
+    pull_ignore_.insert(id);
+  }
   id_uuid_.erase(id);
   handles_.erase(it);
   return CancelResult::kOk;
@@ -147,6 +247,11 @@ void TradingEngine::drain() {
   for (;;) {
     const auto it = pending_.find(next_place_seq_);
     if (it == pending_.end() || !it->second.acked || !it->second.pos_ready) {
+      break;
+    }
+    // Ensure the resident window covers the head order's reach before placing
+    // it; if a deep pull is issued, stop draining until it completes.
+    if (!ensure_depth(it->second.symbol, it->second.order)) {
       break;
     }
     Pending p = std::move(it->second);
