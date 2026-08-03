@@ -84,9 +84,10 @@ all of the above <- app (wiring/main)
 
 Key design decisions:
 - Network layer is hand-rolled (no third-party HTTP/WS library).
-- TLS/HTTPS uses a system crypto library (OpenSSL/LibreSSL) for the crypto
-  layer only, behind a `SecureTransport` seam; HTTP/WS parsing stays
-  hand-rolled. (Hardening phase.)
+- TLS is NOT handled in-process: an edge reverse proxy terminates HTTPS/WSS and
+  forwards plaintext to codicis on localhost. The old in-process
+  `SecureTransport` seam (H1) is dropped. See the market-data/scaling decision
+  in "To Design".
 - Order book is a dense dynamic-array "ladder" (ring buffer indexed by tick
   offset) for O(1) price->level lookup, with intrusive FIFO lists per level.
 - IPC is a generic helper framework so more helper types (trade reporter,
@@ -433,6 +434,6 @@ Linux (CI/container) during hardening.
             auth cases in test_app; verified live.
       - [ ] JWT/PASETO verification at the edge, mTLS, or HMAC request signing
             as alternative/stronger authentication front-ends (see To Design).
-- [ ] H2 Hardening (robustness): parser fuzzing, bounded outbox + backpressure,
-      Linux/epoll validation, load tests. (H1 TLS is dropped -- TLS is
-      offloaded to an edge proxy; see To Design.)
+- [ ] H2 Hardening (robustness): parser fuzzing, bounded outbox + backpressure
+      (503 when full), Linux/epoll validation, load tests. (H1 in-process TLS is
+      dropped entirely -- TLS is offloaded to an edge proxy; see To Design.)

@@ -56,8 +56,9 @@ Every option is also settable via a config file (see
   helper pipes. A common abstraction wraps `kqueue` (BSD/macOS) and `epoll`
   (Linux).
 - **Hand-rolled network layer.** HTTP/1.1 and RFC6455 WebSocket are implemented
-  directly on the event loop with no third-party HTTP/WS libraries. HTTPS/WSS
-  use a system crypto library for TLS only (planned hardening phase).
+  directly on the event loop with no third-party HTTP/WS libraries. TLS is not
+  handled in-process: an edge reverse proxy terminates HTTPS/WSS and forwards
+  plaintext to codicis on localhost.
 - **No in-process persistence.** Persistence and deep order-book levels are
   delegated to pluggable child-process helpers over pipes, with pipelined
   request/response and both a text `key=value` and a binary wire encoding.
@@ -196,4 +197,5 @@ config/            Example configuration.
 
 P0 build skeleton (done) -> P1 config -> P2 event loop -> P3 HTTP ->
 P4 WebSocket -> P5 IPC helpers -> P6 wiring/core seam -> OT0-OT8 order types ->
-H1-H2 hardening (TLS, robustness).
+H2 hardening (parser fuzzing, bounded outbox + backpressure, Linux/epoll
+validation, load tests). TLS is offloaded to an edge proxy, not built here.
