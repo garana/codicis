@@ -108,8 +108,11 @@ class StorageClient {
   void commit(CommitFn cb);
 
   /**
-   * @brief Record a resting order that lives only in storage (deep, evicted or
-   *        priced beyond the resident window), so it can be pulled back later.
+   * @brief Record that an order rested (resident or deep) in the storage book.
+   *
+   * Reported once, when the order rests, so the helper holds the full resting
+   * book. Eviction and pull-back then move the order between memory and storage
+   * with NO further report -- it is already recorded here.
    * @param symbol The instrument.
    * @param side   "buy" or "sell".
    * @param id     The internal order id.
@@ -118,17 +121,20 @@ class StorageClient {
    * @param seq    The arrival sequence (time priority).
    * @param cb     Completion callback (may be empty).
    */
-  void report_deep(const std::string& symbol, const std::string& side,
+  void report_rest(const std::string& symbol, const std::string& side,
                    std::uint64_t id, std::int64_t price, std::int64_t leaves,
                    std::uint64_t seq, ReportFn cb);
 
   /**
-   * @brief Remove a deep resting order (it was cancelled or pulled resident).
+   * @brief Remove a resting order from the storage book (it was cancelled).
+   *
+   * Fills that exhaust an order remove it automatically (via report_fill); this
+   * is for explicit cancels.
    * @param symbol The instrument.
    * @param id     The internal order id.
    * @param cb     Completion callback (may be empty).
    */
-  void remove_deep(const std::string& symbol, std::uint64_t id, ReportFn cb);
+  void report_cancel(const std::string& symbol, std::uint64_t id, ReportFn cb);
 
   /**
    * @brief Pull the best deep levels beyond @p from_price back into memory.

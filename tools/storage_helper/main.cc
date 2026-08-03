@@ -56,28 +56,63 @@ struct OrderInfo {
   std::string symbol;  /**< Instrument. */
 };
 
-/** @brief A deep (non-resident) resting order the engine can pull back. */
-struct DeepOrder {
+/** @brief A resting order the engine can pull back into memory. */
+struct RestingOrder {
   std::uint64_t id = 0;
   std::int64_t price = 0;
   std::int64_t leaves = 0;
   std::uint64_t seq = 0;
 };
 
-/** @brief In-memory system of record for the reference helper. */
+/**
+ * @brief In-memory system of record for the reference helper.
+ *
+ * `resting` holds the FULL continuous resting book (every order that rested,
+ * resident or not), reported once when it rests. Eviction and pull-back move
+ * an order between the matching process's memory and this store WITHOUT any
+ * further report -- the order is already here; only fills and cancels mutate
+ * it. pull_levels returns only the deep slice (prices beyond the caller's
+ * resident boundary), disjoint from what the caller already holds resident.
+ */
 struct State {
   std::uint64_t highest = 0;  /**< Highest reported req_id (commit watermark). */
   std::map<std::uint64_t, OrderInfo> order_info;  /**< order id -> attribution. */
   std::map<std::pair<std::string, std::string>, std::int64_t>
       positions;  /**< (owner, symbol) -> signed net position. */
-  // Deep resting orders, keyed by (symbol, side) -> price -> FIFO by seq.
+  // The resting book, keyed by (symbol, side) -> price -> FIFO by seq.
   std::map<std::pair<std::string, std::string>,
-           std::map<std::int64_t, std::vector<DeepOrder>>>
-      deep;
-  // id -> (symbol, side, price), to locate a deep order for removal.
+           std::map<std::int64_t, std::vector<RestingOrder>>>
+      resting;
+  // id -> (symbol, side, price), to locate a resting order to decrement/remove.
   std::map<std::uint64_t, std::tuple<std::string, std::string, std::int64_t>>
-      deep_index;
+      rest_index;
 };
+
+/** @brief Remove @p id from the resting book (helper), if present. */
+void RemoveResting(State* st, std::uint64_t id) {
+  const auto xit = st->rest_index.find(id);
+  if (xit == st->rest_index.end()) {
+    return;
+  }
+  const auto& [sym, side, price] = xit->second;
+  const auto mit = st->resting.find({sym, side});
+  if (mit != st->resting.end()) {
+    const auto pit = mit->second.find(price);
+    if (pit != mit->second.end()) {
+      auto& v = pit->second;
+      v.erase(std::remove_if(v.begin(), v.end(),
+                             [id](const RestingOrder& d) { return d.id == id; }),
+              v.end());
+      if (v.empty()) {
+        mit->second.erase(pit);
+      }
+      if (mit->second.empty()) {
+        st->resting.erase(mit);
+      }
+    }
+  }
+  st->rest_index.erase(xit);
+}
 
 /** @brief Write all bytes to @p fd, retrying short writes. */
 void WriteAll(int fd, const std::string& data) {
@@ -117,16 +152,33 @@ HelperMessage Handle(State* st, const HelperMessage& req) {
     resp.set("status", "ok");
   } else if (req.type == "report_fill") {
     st->highest = std::max(st->highest, req.req_id);
-    // Update the owning account's net position for the symbol (buy +, sell -).
     const std::string* id = req.get("id");
     const std::string* qty = req.get("qty");
     if (id != nullptr && qty != nullptr) {
-      const auto it =
-          st->order_info.find(static_cast<std::uint64_t>(ParseInt(*id)));
+      const std::uint64_t oid = static_cast<std::uint64_t>(ParseInt(*id));
+      const std::int64_t q = ParseInt(*qty);
+      // Update the owning account's net position (buy +, sell -).
+      const auto it = st->order_info.find(oid);
       if (it != st->order_info.end() && !it->second.owner.empty()) {
-        const std::int64_t q = ParseInt(*qty);
         st->positions[{it->second.owner, it->second.symbol}] +=
             it->second.side == "buy" ? q : -q;
+      }
+      // Decrement the order in the resting book (if it rested here); drop it
+      // when fully filled. A taker that never rested is simply not present.
+      const auto xit = st->rest_index.find(oid);
+      if (xit != st->rest_index.end()) {
+        const auto& [s, side, price] = xit->second;
+        auto& v = st->resting[{s, side}][price];
+        std::int64_t leaves_left = 0;
+        for (RestingOrder& o : v) {
+          if (o.id == oid) {
+            o.leaves -= q;
+            leaves_left = o.leaves;
+          }
+        }
+        if (leaves_left <= 0) {
+          RemoveResting(st, oid);
+        }
       }
     }
     resp.type = req.type;
@@ -150,53 +202,32 @@ HelperMessage Handle(State* st, const HelperMessage& req) {
       }
     }
     resp.set("net", std::to_string(net));
-  } else if (req.type == "report_deep") {
-    // Record a resting order that lives only in storage (deep / evicted).
+  } else if (req.type == "report_rest") {
+    // An order rested (resident or deep). Record it once here; eviction and
+    // pull-back need no further report -- the order is already in this store.
     const std::string* sym = req.get("symbol");
     const std::string* side = req.get("side");
     const std::string* id = req.get("id");
     if (sym != nullptr && side != nullptr && id != nullptr) {
-      DeepOrder o;
+      RestingOrder o;
       o.id = static_cast<std::uint64_t>(ParseInt(*id));
       o.price = req.get("price") != nullptr ? ParseInt(*req.get("price")) : 0;
       o.leaves = req.get("leaves") != nullptr ? ParseInt(*req.get("leaves")) : 0;
       o.seq = req.get("seq") != nullptr
                   ? static_cast<std::uint64_t>(ParseInt(*req.get("seq")))
                   : 0;
-      st->deep[{*sym, *side}][o.price].push_back(o);
-      st->deep_index[o.id] = {*sym, *side, o.price};
+      RemoveResting(st, o.id);  // idempotent re-report (e.g. after a re-price)
+      st->resting[{*sym, *side}][o.price].push_back(o);
+      st->rest_index[o.id] = {*sym, *side, o.price};
     }
-    resp.type = "report_deep";
+    resp.type = "report_rest";
     resp.set("status", "ok");
-  } else if (req.type == "remove_deep") {
+  } else if (req.type == "report_cancel") {
     const std::string* id = req.get("id");
     if (id != nullptr) {
-      const std::uint64_t oid = static_cast<std::uint64_t>(ParseInt(*id));
-      const auto xit = st->deep_index.find(oid);
-      if (xit != st->deep_index.end()) {
-        const auto& [s, side, price] = xit->second;
-        const auto mit = st->deep.find({s, side});
-        if (mit != st->deep.end()) {
-          const auto pit = mit->second.find(price);
-          if (pit != mit->second.end()) {
-            auto& v = pit->second;
-            v.erase(std::remove_if(v.begin(), v.end(),
-                                   [oid](const DeepOrder& d) {
-                                     return d.id == oid;
-                                   }),
-                    v.end());
-            if (v.empty()) {
-              mit->second.erase(pit);
-            }
-            if (mit->second.empty()) {
-              st->deep.erase(mit);
-            }
-          }
-        }
-        st->deep_index.erase(xit);
-      }
+      RemoveResting(st, static_cast<std::uint64_t>(ParseInt(*id)));
     }
-    resp.type = "remove_deep";
+    resp.type = "report_cancel";
     resp.set("status", "ok");
   } else if (req.type == "pull_levels") {
     // Return the best deep levels beyond from_price, best-price first and, in
@@ -211,20 +242,20 @@ HelperMessage Handle(State* st, const HelperMessage& req) {
         req.get("count") != nullptr ? ParseInt(*req.get("count")) : 0;
     std::string blob;
     std::int64_t levels = 0;
-    auto emit = [&](std::vector<DeepOrder> orders) {
+    auto emit = [&](std::vector<RestingOrder> orders) {
       std::sort(orders.begin(), orders.end(),
-                [](const DeepOrder& a, const DeepOrder& b) {
+                [](const RestingOrder& a, const RestingOrder& b) {
                   return a.seq < b.seq;  // arrival order within the level
                 });
-      for (const DeepOrder& o : orders) {
+      for (const RestingOrder& o : orders) {
         blob += std::to_string(o.id) + "," + std::to_string(o.price) + "," +
                 std::to_string(o.leaves) + "," + std::to_string(o.seq) + ";";
       }
       ++levels;
     };
     if (sym != nullptr && side != nullptr) {
-      const auto mit = st->deep.find({*sym, *side});
-      if (mit != st->deep.end()) {
+      const auto mit = st->resting.find({*sym, *side});
+      if (mit != st->resting.end()) {
         const auto& prices = mit->second;  // ascending by price
         if (*side == "buy") {  // best deep bid = highest price below the window
           for (auto it = prices.rbegin(); it != prices.rend() && levels < count;

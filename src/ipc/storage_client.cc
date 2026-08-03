@@ -135,11 +135,11 @@ std::vector<PulledOrder> ParseOrders(const std::string& blob) {
 
 }  // namespace
 
-void StorageClient::report_deep(const std::string& symbol,
+void StorageClient::report_rest(const std::string& symbol,
                                 const std::string& side, std::uint64_t id,
                                 std::int64_t price, std::int64_t leaves,
                                 std::uint64_t seq, ReportFn cb) {
-  helper_.send("report_deep",
+  helper_.send("report_rest",
                {{"symbol", symbol},
                 {"side", side},
                 {"id", std::to_string(id)},
@@ -153,9 +153,9 @@ void StorageClient::report_deep(const std::string& symbol,
                });
 }
 
-void StorageClient::remove_deep(const std::string& symbol, std::uint64_t id,
-                                ReportFn cb) {
-  helper_.send("remove_deep",
+void StorageClient::report_cancel(const std::string& symbol, std::uint64_t id,
+                                  ReportFn cb) {
+  helper_.send("report_cancel",
                {{"symbol", symbol}, {"id", std::to_string(id)}},
                [cb = std::move(cb)](bool ok, const HelperMessage&) {
                  if (cb) {

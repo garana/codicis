@@ -348,7 +348,7 @@ TEST_CASE("Storage helper accumulates positions and answers pull_position",
   REQUIRE(c_net == 0);    // flat
 }
 
-TEST_CASE("Storage helper serves deep levels via pull_levels",
+TEST_CASE("Storage helper serves the resting book via pull_levels",
           "[ipc][spawn][deep]") {
   SystemClock clock;
   Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
@@ -367,11 +367,11 @@ TEST_CASE("Storage helper serves deep levels via pull_levels",
     }
   };
 
-  // Two deep bids at 100 (arrival order 1 then 2) and a deeper one at 99.
+  // Two resting bids at 100 (arrival order 1 then 2) and a deeper one at 99.
   bool d = false;
-  storage.report_deep("BTC", "buy", 1, 100, 5, 1, nullptr);
-  storage.report_deep("BTC", "buy", 2, 100, 3, 2, nullptr);
-  storage.report_deep("BTC", "buy", 3, 99, 4, 3, [&](bool) { d = true; });
+  storage.report_rest("BTC", "buy", 1, 100, 5, 1, nullptr);
+  storage.report_rest("BTC", "buy", 2, 100, 3, 2, nullptr);
+  storage.report_rest("BTC", "buy", 3, 99, 4, 3, [&](bool) { d = true; });
   pump(d);
 
   // Pull the best 2 deep bid levels below 101: level 100 (ids 1,2 in arrival
@@ -406,9 +406,9 @@ TEST_CASE("Storage helper serves deep levels via pull_levels",
   REQUIRE(one.size() == 2);  // both orders at price 100
   REQUIRE(one[0].price == 100);
 
-  // Removing id 2 drops it from the level.
+  // Cancelling id 2 drops it from the level.
   bool r = false;
-  storage.remove_deep("BTC", 2, [&](bool) { r = true; });
+  storage.report_cancel("BTC", 2, [&](bool) { r = true; });
   pump(r);
   std::vector<PulledOrder> after;
   bool p3 = false;
@@ -421,6 +421,42 @@ TEST_CASE("Storage helper serves deep levels via pull_levels",
   REQUIRE(after.size() == 2);  // id 1 at 100, id 3 at 99
   REQUIRE(after[0].id == 1);
   REQUIRE(after[1].id == 3);
+
+  // A fill decrements a resting order's leaves, and a full fill removes it.
+  // First report id 1's owner/side so report_fill is attributed, then fill 2.
+  bool f = false;
+  storage.report_order(
+      {{"owner", "u"}, {"id", "1"}, {"side", "buy"}, {"symbol", "BTC"}},
+      nullptr);
+  storage.report_fill({{"symbol", "BTC"}, {"id", "1"}, {"qty", "2"}},
+                      [&](bool) { f = true; });
+  pump(f);
+  std::vector<PulledOrder> filled;
+  bool p4 = false;
+  storage.pull_levels("BTC", "buy", 101, 2,
+                      [&](bool ok, std::vector<PulledOrder> o) {
+                        filled = std::move(o);
+                        p4 = ok;
+                      });
+  pump(p4);
+  REQUIRE(filled.size() == 2);
+  REQUIRE(filled[0].id == 1);
+  REQUIRE(filled[0].leaves == 3);  // 5 - 2 filled
+
+  bool f2 = false;
+  storage.report_fill({{"symbol", "BTC"}, {"id", "1"}, {"qty", "3"}},
+                      [&](bool) { f2 = true; });
+  pump(f2);
+  std::vector<PulledOrder> gone;
+  bool p5 = false;
+  storage.pull_levels("BTC", "buy", 101, 2,
+                      [&](bool ok, std::vector<PulledOrder> o) {
+                        gone = std::move(o);
+                        p5 = ok;
+                      });
+  pump(p5);
+  REQUIRE(gone.size() == 1);   // id 1 fully filled and removed; only id 3 left
+  REQUIRE(gone[0].id == 3);
 }
 #endif
 
