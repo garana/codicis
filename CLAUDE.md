@@ -219,6 +219,14 @@ This file (Progress + To Design) is the durable project record. The plan file
   with the out-of-line `Conditional` owning pointer above. `std::pmr` over an
   `unsynchronized_pool_resource` is an acceptable stepping stone, but the
   target is the intrusive pool. Measure before committing.
+  INTERIM DONE: the book's node-allocating containers (each level's FIFO list,
+  the id->Entry / stops / pegged / groups / order_group maps, and the per-side
+  `deque<Level>`) now draw from one `std::pmr::unsynchronized_pool_resource`
+  owned by `OrderBook::Impl` (`Level` was made allocator-aware so the pooled
+  resource propagates into each level's list). This recycles node allocations
+  without changing behavior; it does NOT yet remove the separate list/map nodes
+  or the allocator's virtual dispatch -- the intrusive Order pool remains the
+  target. Group's inner `std::vector`s are still globally allocated (rare).
 - **Parameterize numeric widths -- template Order (decided).** Make `Order`
   (and `OrderBook`/matcher/`Trade`) a template over the numeric types, e.g.
   `template<class Qty = std::uint64_t, class Px = std::int64_t,

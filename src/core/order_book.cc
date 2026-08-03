@@ -6,21 +6,42 @@
 #include "codicis/core/order_book.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <deque>
 #include <list>
+#include <memory_resource>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace codicis {
 namespace {
 
-/** @brief One price level: FIFO of resting order ids plus running totals. */
+/**
+ * @brief One price level: FIFO of resting order ids plus running totals.
+ *
+ * Allocator-aware (uses-allocator protocol) so that when it lives inside a
+ * std::pmr::deque the level's FIFO list draws its nodes from the same pooled
+ * memory resource as the rest of the book.
+ */
 struct Level {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
   Quantity total = 0;      /**< Matchable quantity (incl. hidden/reserve). */
   Quantity displayed = 0;  /**< Publicly visible quantity. */
-  std::list<OrderId> fifo;
+  std::pmr::list<OrderId> fifo;
+
+  explicit Level(const allocator_type& alloc = {}) : fifo(alloc) {}
+  Level(const Level& o, const allocator_type& alloc = {})
+      : total(o.total), displayed(o.displayed), fifo(o.fifo, alloc) {}
+  Level(Level&& o, const allocator_type& alloc)
+      : total(o.total), displayed(o.displayed), fifo(std::move(o.fifo), alloc) {}
+  Level(Level&&) = default;
+  Level& operator=(const Level&) = default;
+  Level& operator=(Level&&) = default;
+  ~Level() = default;
 };
 
 /**
@@ -47,10 +68,10 @@ Quantity DisplayedOf(std::uint32_t flags, Quantity leaves, Quantity slice) {
  * access and O(1) growth at either end as the covered price range slides.
  */
 struct Ladder {
-  explicit Ladder(Side s) : side(s) {}
+  Ladder(Side s, std::pmr::memory_resource* mr) : side(s), levels(mr) {}
 
   Side side;
-  std::deque<Level> levels;
+  std::pmr::deque<Level> levels;
   Ticks base = 0;
   bool has_base = false;
   bool best_valid = false;
@@ -157,7 +178,7 @@ struct OrderBook::Impl {
   /** @brief A resting order plus its position in a level's FIFO. */
   struct Entry {
     Order order;
-    std::list<OrderId>::iterator pos;
+    std::pmr::list<OrderId>::iterator pos;
     Quantity slice = 0;  /**< Iceberg visible slice remaining (else unused). */
   };
 
@@ -169,17 +190,33 @@ struct OrderBook::Impl {
     std::vector<Order> pending_oco;   /**< Bracket TP/SL, released as OCO. */
   };
 
-  Ladder bids{Side::Buy};
-  Ladder asks{Side::Sell};
-  std::unordered_map<OrderId, Entry> orders;
-  std::unordered_map<OrderId, Order> stops;  // parked, awaiting a trigger
-  std::unordered_set<OrderId> pegged;        // resting orders that reprice
-  std::unordered_map<std::uint64_t, Group> groups;   // contingent groups
-  std::unordered_map<OrderId, std::uint64_t> order_group;  // linked -> group
+  // One pooled memory resource backs every node-allocating container below, so
+  // steady-state submit/cancel recycles freed nodes instead of calling the
+  // global allocator each time. The core is single-threaded, so the
+  // unsynchronized (lock-free) pool is safe. Declared first, hence destroyed
+  // last -- after every container that draws from it.
+  std::pmr::unsynchronized_pool_resource pool_;
+  Ladder bids;
+  Ladder asks;
+  std::pmr::unordered_map<OrderId, Entry> orders;
+  std::pmr::unordered_map<OrderId, Order> stops;    // parked, awaiting trigger
+  std::pmr::unordered_set<OrderId> pegged;          // resting orders that reprice
+  std::pmr::unordered_map<std::uint64_t, Group> groups;      // contingent groups
+  std::pmr::unordered_map<OrderId, std::uint64_t> order_group;  // linked->group
   SeqNo next_seq = 1;
   StpPolicy stp = StpPolicy::kNone;
   bool have_last = false;
   Ticks last_price = 0;
+
+  /** @brief Wire every pooled container to the shared memory resource. */
+  Impl()
+      : bids(Side::Buy, &pool_),
+        asks(Side::Sell, &pool_),
+        orders(&pool_),
+        stops(&pool_),
+        pegged(&pool_),
+        groups(&pool_),
+        order_group(&pool_) {}
 
   /** @return The ladder for side s. */
   Ladder& ladder(Side s) { return s == Side::Buy ? bids : asks; }
