@@ -154,3 +154,43 @@ TEST_CASE("Rejects malformed input", "[http][parser]") {
     REQUIRE(p.parse(b) == Progress::kError);
   }
 }
+
+TEST_CASE("Rejects adversarial framing (H2 hardening)", "[http][parser]") {
+  auto rejects = [](std::string_view raw) {
+    HttpRequestParser p;
+    Buffer b;
+    Feed(b, raw);
+    return p.parse(b) == Progress::kError;
+  };
+
+  SECTION("non-numeric Content-Length") {
+    REQUIRE(rejects("POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n"));
+  }
+  SECTION("negative Content-Length") {
+    REQUIRE(rejects("POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n"));
+  }
+  SECTION("overflowing Content-Length") {
+    REQUIRE(rejects(
+        "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n"));
+  }
+  SECTION("conflicting duplicate Content-Length (smuggling)") {
+    REQUIRE(rejects(
+        "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n"));
+  }
+  SECTION("Content-Length and Transfer-Encoding together (smuggling)") {
+    REQUIRE(
+        rejects("POST / HTTP/1.1\r\nContent-Length: 5\r\n"
+                "Transfer-Encoding: chunked\r\n\r\n"));
+  }
+  SECTION("non-hex chunk size") {
+    REQUIRE(rejects(
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\n"));
+  }
+  SECTION("overflowing chunk size") {
+    REQUIRE(rejects("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    "ffffffffffffffffff\r\n"));
+  }
+  SECTION("header line without a colon") {
+    REQUIRE(rejects("GET / HTTP/1.1\r\nBadHeaderNoColon\r\n\r\n"));
+  }
+}

@@ -175,8 +175,28 @@ bool HttpRequestParser::parse_head(std::string_view block) {
     }
   }
 
-  // Determine body framing.
-  if (const std::string* te = request_.header("Transfer-Encoding")) {
+  // Determine body framing. Scan for Content-Length occurrences first so we can
+  // reject request-smuggling framing (conflicting duplicates; CL with TE).
+  const std::string* te = request_.header("Transfer-Encoding");
+  const std::string* cl = nullptr;
+  for (const HttpHeader& h : request_.headers) {
+    if (!IEquals(h.name, "Content-Length")) {
+      continue;
+    }
+    if (cl != nullptr && TrimOws(h.value) != TrimOws(*cl)) {
+      error_ = "conflicting Content-Length";  // smuggling vector
+      return false;
+    }
+    cl = &h.value;
+  }
+  // A message with both Content-Length and Transfer-Encoding is ambiguous
+  // (the classic CL.TE / TE.CL smuggling pair) -- reject it.
+  if (te != nullptr && cl != nullptr) {
+    error_ = "Content-Length with Transfer-Encoding";
+    return false;
+  }
+
+  if (te != nullptr) {
     if (IEquals(TrimOws(*te), "chunked")) {
       state_ = State::kBodyChunked;
       chunk_phase_ = ChunkPhase::kSize;
@@ -185,11 +205,16 @@ bool HttpRequestParser::parse_head(std::string_view block) {
     error_ = "unsupported Transfer-Encoding";
     return false;
   }
-  if (const std::string* cl = request_.header("Content-Length")) {
+  if (cl != nullptr) {
+    constexpr std::size_t kMax = static_cast<std::size_t>(-1);
     std::size_t len = 0;
     for (char c : TrimOws(*cl)) {
       if (c < '0' || c > '9') {
         error_ = "invalid Content-Length";
+        return false;
+      }
+      if (len > (kMax - 9) / 10) {  // guard the multiply/add against overflow
+        error_ = "Content-Length overflow";
         return false;
       }
       len = len * 10 + static_cast<std::size_t>(c - '0');
