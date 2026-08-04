@@ -5,8 +5,11 @@
 
 #include "catch_amalgamated.hpp"
 
+#include "codicis/core/book_event.h"
 #include "codicis/core/matching_engine.h"
 #include "codicis/core/order.h"
+
+#include <vector>
 
 using namespace codicis;
 
@@ -22,6 +25,12 @@ Order Limit(OrderId id, Side side, Ticks price, Quantity qty) {
   o.qty = qty;
   return o;
 }
+
+/** @brief A book-event sink that records every event for assertions. */
+struct RecordingSink : BookEventSink {
+  std::vector<BookEvent> events;
+  void on_book_event(const BookEvent& ev) override { events.push_back(ev); }
+};
 
 }  // namespace
 
@@ -90,4 +99,63 @@ TEST_CASE("Unknown symbol queries are empty, not errors", "[core][engine]") {
   REQUIRE(engine.displayed_qty_at("NONE", Side::Sell, 100) == 0);
   REQUIRE(engine.find("NONE", 1) == nullptr);
   REQUIRE(engine.expire("NONE", 1000).empty());
+}
+
+TEST_CASE("Book events are emitted with a global sequence", "[core][feed]") {
+  MatchingEngine engine;
+  RecordingSink sink;
+  engine.set_book_event_sink(&sink);
+
+  // A resting sell -> Add. A crossing buy -> Trade, and its remainder Adds.
+  engine.submit("BTC", Limit(1, Side::Sell, 100, 10));
+  engine.submit("BTC", Limit(2, Side::Buy, 100, 4));   // fully fills, no rest
+  engine.submit("ETH", Limit(3, Side::Buy, 50, 5));    // rests on another book
+
+  REQUIRE(sink.events.size() == 3);
+
+  // 1) Add of the resting BTC sell.
+  REQUIRE(sink.events[0].type == BookEventType::kAdd);
+  REQUIRE(sink.events[0].symbol == "BTC");
+  REQUIRE(sink.events[0].order_id == 1);
+  REQUIRE(sink.events[0].side == Side::Sell);
+  REQUIRE(sink.events[0].price == 100);
+  REQUIRE(sink.events[0].qty == 10);
+
+  // 2) Trade from the crossing buy (maker 1, taker 2), aggressor side buy.
+  REQUIRE(sink.events[1].type == BookEventType::kTrade);
+  REQUIRE(sink.events[1].symbol == "BTC");
+  REQUIRE(sink.events[1].order_id == 1);   // maker
+  REQUIRE(sink.events[1].taker_id == 2);
+  REQUIRE(sink.events[1].side == Side::Buy);
+  REQUIRE(sink.events[1].price == 100);
+  REQUIRE(sink.events[1].qty == 4);
+
+  // 3) Add of the ETH bid -- a different symbol shares the one feed clock.
+  REQUIRE(sink.events[2].type == BookEventType::kAdd);
+  REQUIRE(sink.events[2].symbol == "ETH");
+  REQUIRE(sink.events[2].order_id == 3);
+
+  // Sequence numbers are global, monotonic, and contiguous across symbols.
+  REQUIRE(sink.events[0].seq == 1);
+  REQUIRE(sink.events[1].seq == 2);
+  REQUIRE(sink.events[2].seq == 3);
+  REQUIRE(engine.last_event_seq() == 3);
+}
+
+TEST_CASE("Cancel emits a book event; a fill does not double-count",
+          "[core][feed]") {
+  MatchingEngine engine;
+  RecordingSink sink;
+  engine.set_book_event_sink(&sink);
+
+  engine.submit("BTC", Limit(1, Side::Buy, 99, 5));  // Add
+  REQUIRE(engine.cancel("BTC", 1));                  // Cancel
+
+  REQUIRE(sink.events.size() == 2);
+  REQUIRE(sink.events[0].type == BookEventType::kAdd);
+  REQUIRE(sink.events[1].type == BookEventType::kCancel);
+  REQUIRE(sink.events[1].order_id == 1);
+  REQUIRE(sink.events[1].side == Side::Buy);
+  REQUIRE(sink.events[1].price == 99);
+  REQUIRE(sink.events[1].qty == 5);
 }

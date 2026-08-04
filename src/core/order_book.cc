@@ -248,6 +248,40 @@ struct OrderBook::Impl {
   bool have_last = false;
   Ticks last_price = 0;
 
+  Symbol symbol_;                       // tags emitted book events
+  BookEventSink* event_sink_ = nullptr; // nullptr disables emission
+
+  /** @brief Emit an Add/Cancel event for order @p o carrying @p qty leaves. */
+  void emit_event(BookEventType type, const Order& o, Quantity qty) {
+    if (event_sink_ == nullptr) {
+      return;
+    }
+    BookEvent ev;
+    ev.symbol = symbol_;
+    ev.type = type;
+    ev.order_id = o.id;
+    ev.side = o.side;
+    ev.price = o.price;
+    ev.qty = qty;
+    event_sink_->on_book_event(ev);
+  }
+
+  /** @brief Emit a Trade event for execution @p t. */
+  void emit_trade(const Trade& t) {
+    if (event_sink_ == nullptr) {
+      return;
+    }
+    BookEvent ev;
+    ev.symbol = symbol_;
+    ev.type = BookEventType::kTrade;
+    ev.order_id = t.maker_id;
+    ev.taker_id = t.taker_id;
+    ev.side = t.taker_side;
+    ev.price = t.price;
+    ev.qty = t.qty;
+    event_sink_->on_book_event(ev);
+  }
+
   /** @brief Wire every pooled container to the shared memory resource. */
   Impl()
       : bids(Side::Buy, &pool_),
@@ -428,6 +462,8 @@ struct OrderBook::Impl {
           lvl.displayed -=
               DisplayedOf(me.order.flags, me.order.leaves, me.slice);
           release_reserved(me.order, me.order.leaves);
+          // The resting maker leaves the book without a fill (STP cancel).
+          emit_event(BookEventType::kCancel, me.order, me.order.leaves);
           it = lvl.fifo.erase(it);
           orders.erase(mid);
           pegged.erase(mid);
@@ -460,6 +496,7 @@ struct OrderBook::Impl {
                              .taker_side = o.side,
                              .price = p,
                              .qty = fill});
+      emit_trade(trades.back());
       last_price = p;  // stop-trigger reference
       have_last = true;
       o.leaves -= fill;
@@ -671,6 +708,7 @@ struct OrderBook::Impl {
         if (worst_price(own, &worst) && populated_count(own) >= mem_levels &&
             worse_than(o.side, o.price, worst)) {
           note_deep(o.side, o.price);  // beyond the window -> rests deep
+          emit_event(BookEventType::kAdd, o, o.leaves);  // joins the book (deep)
           return false;
         }
       }
@@ -696,6 +734,7 @@ struct OrderBook::Impl {
     if (mem_levels > 0 && new_level && populated_count(own) > mem_levels) {
       evict_worst(own, evicted);
     }
+    emit_event(BookEventType::kAdd, o, o.leaves);  // joins the book (resident)
     return true;
   }
 
@@ -1108,6 +1147,7 @@ struct OrderBook::Impl {
                                .taker_side = Side::Buy,
                                .price = pstar,
                                .qty = q});
+        emit_trade(trades.back());
         b->leaves -= q;
         b->filled += q;
         s->leaves -= q;
@@ -1159,6 +1199,14 @@ OrderBook::OrderBook(StpPolicy stp, std::size_t mem_levels)
 }
 
 OrderBook::~OrderBook() = default;
+
+void OrderBook::set_symbol(Symbol symbol) {
+  impl_->symbol_ = std::move(symbol);
+}
+
+void OrderBook::set_event_sink(BookEventSink* sink) {
+  impl_->event_sink_ = sink;
+}
 
 SubmitOutcome OrderBook::submit(Order order) {
   Normalize(&order);
@@ -1457,6 +1505,9 @@ bool OrderBook::cancel(OrderId id) {
   const Ticks price = e.order.price;
   const Quantity leaves = e.order.leaves;
   const Quantity displayed = DisplayedOf(e.order.flags, leaves, e.slice);
+  // The order leaves the book other than by a fill (explicit cancel, GTD/DAY
+  // expiry via expire(), or an OCO sibling cancel routed through here).
+  impl_->emit_event(BookEventType::kCancel, e.order, leaves);
   impl_->release_reserved(e.order, leaves);  // a resting reduce-only order
   Ladder& own = impl_->ladder(side);
   if (Level* lvl = own.at(price); lvl != nullptr) {

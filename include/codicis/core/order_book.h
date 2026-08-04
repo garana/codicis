@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "codicis/core/book_event.h"
 #include "codicis/core/order.h"
 #include "codicis/core/types.h"
 
@@ -94,6 +95,22 @@ class OrderBook {
 
   OrderBook(const OrderBook&) = delete;
   OrderBook& operator=(const OrderBook&) = delete;
+
+  /**
+   * @brief Set the instrument symbol used to tag emitted book events.
+   * @param symbol The instrument this book trades.
+   */
+  void set_symbol(Symbol symbol);
+
+  /**
+   * @brief Install the book-event sink (nullptr disables emission).
+   *
+   * When set, the book calls @p sink synchronously for every Add/Cancel/Trade
+   * mutation, in application order. The @c seq is left 0 for the caller (the
+   * MatchingEngine) to stamp with a global monotonic value.
+   * @param sink The sink, or nullptr to stop emitting.
+   */
+  void set_event_sink(BookEventSink* sink);
 
   /**
    * @brief Submit an order for matching (and resting, if applicable).

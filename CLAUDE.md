@@ -532,8 +532,27 @@ Linux (CI/container) during hardening.
             only for the owner (kOk/kNotFound/kForbidden). NB: an earlier commit
             (a4a2d95) briefly took the owner from a client `user` form field;
             that field was REMOVED -- identity now comes only from auth (below).
-      - [ ] A sequence-numbered book-event stream, then the feed-helper building
+      - [~] A sequence-numbered book-event stream, then the feed-helper building
             L1/L2/L3. Build in that order.
+            - [x] Slice 1 (core emission): `core/book_event.h` defines BookEvent
+                  (seq, symbol, type, order/taker id, side, price, qty) +
+                  BookEventSink. OrderBook emits Add/Cancel/Trade at the
+                  mutation chokepoints -- rest() (resident AND deep), the
+                  in-match STP cancel, cancel() (which also covers GTD/DAY
+                  expiry and OCO sibling cancels routed through it), and the
+                  continuous + auction trade sites. A full fill does NOT emit
+                  Cancel (the Trade already conveys the maker's departure);
+                  eviction/pull-back emit nothing (the order stays in the book).
+                  MatchingEngine is each book's sink: the book stamps the
+                  symbol, the engine stamps a single GLOBAL monotonic seq
+                  (`set_book_event_sink`, `last_event_seq`) and forwards to the
+                  downstream feed consumer. Tested in test_matching_engine
+                  (Add/Trade/Add across two symbols with contiguous seqs;
+                  cancel emits, fill does not). No transport yet.
+            - [ ] Slice 2+: emit Reprice (peg move), Replenish (iceberg), and
+                  Trigger (stop fires) events; then the feed-helper (consume the
+                  stream, build L1/L2/L3, snapshot+resync on gap) over a
+                  pipe -> SPMC ring -> UDP transport. Wire an AppServer sink.
 - [~] Authentication + authorization layer:
       - [x] Owner authorization enforced in the engine (owner uuid vs cancel
             requester); order handles are external uuids (see above).

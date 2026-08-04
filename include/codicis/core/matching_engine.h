@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "codicis/core/book_event.h"
 #include "codicis/core/order.h"
 #include "codicis/core/order_book.h"
 #include "codicis/core/types.h"
@@ -27,8 +28,13 @@ namespace codicis {
 
 /**
  * @brief Routes order-book operations to a per-symbol @ref OrderBook.
+ *
+ * It is itself the @ref BookEventSink for every book it owns: each book stamps
+ * the symbol and calls back here, where a single global monotonic sequence is
+ * assigned before forwarding to the registered downstream sink (the feed). One
+ * feed clock across all instruments; a per-symbol consumer filters by symbol.
  */
-class MatchingEngine {
+class MatchingEngine : public BookEventSink {
  public:
   /**
    * @brief Construct with a self-trade prevention policy for all books.
@@ -184,6 +190,21 @@ class MatchingEngine {
   /** @return The number of instruments with a book. */
   std::size_t symbol_count() const { return books_.size(); }
 
+  /**
+   * @brief Register the downstream book-event consumer (nullptr to detach).
+   *
+   * The engine installs itself as each book's sink; events flow book -> engine
+   * (seq stamped) -> @p sink. Books created after this call inherit emission.
+   * @param sink The feed consumer, or nullptr to stop forwarding.
+   */
+  void set_book_event_sink(BookEventSink* sink) { feed_sink_ = sink; }
+
+  /** @return The last global book-event sequence number assigned (0 if none). */
+  SeqNo last_event_seq() const { return event_seq_; }
+
+  /** @brief BookEventSink: stamp a global seq and forward to the feed sink. */
+  void on_book_event(const BookEvent& ev) override;
+
  private:
   /** @return The book for @p symbol, creating it if absent. */
   OrderBook& book_for(const Symbol& symbol);
@@ -194,6 +215,8 @@ class MatchingEngine {
   StpPolicy stp_;
   std::size_t mem_levels_ = 0;
   std::unordered_map<Symbol, std::unique_ptr<OrderBook>> books_;
+  BookEventSink* feed_sink_ = nullptr;  // downstream feed consumer (optional)
+  SeqNo event_seq_ = 0;                 // global monotonic feed sequence
 };
 
 }  // namespace codicis

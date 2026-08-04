@@ -16,8 +16,22 @@ OrderBook& MatchingEngine::book_for(const Symbol& symbol) {
   }
   auto book = std::make_unique<OrderBook>(stp_, mem_levels_);
   OrderBook& ref = *book;
+  // The engine is every book's event sink: the book stamps the symbol and calls
+  // back here, where a global sequence is assigned before forwarding.
+  ref.set_symbol(symbol);
+  ref.set_event_sink(this);
   books_.emplace(symbol, std::move(book));
   return ref;
+}
+
+void MatchingEngine::on_book_event(const BookEvent& ev) {
+  ++event_seq_;
+  if (feed_sink_ == nullptr) {
+    return;
+  }
+  BookEvent stamped = ev;
+  stamped.seq = event_seq_;
+  feed_sink_->on_book_event(stamped);
 }
 
 const OrderBook* MatchingEngine::book_of(const Symbol& symbol) const {
