@@ -155,6 +155,26 @@ TEST_CASE("REST submit matches and reports end-to-end", "[app]") {
     std::string resp = RoundTrip(loop, port, Post("/orders", "side=buy"));
     REQUIRE(resp.rfind("HTTP/1.1 400", 0) == 0);
   }
+
+  SECTION("metrics reflect order activity") {
+    // A resting sell then a crossing buy: one trade print, two accepted orders.
+    RoundTrip(loop, port, Post("/orders", "symbol=BTC&side=sell&type=limit&"
+                                          "price=100&qty=10"));
+    RoundTrip(loop, port, Post("/orders", "symbol=BTC&side=buy&type=limit&"
+                                          "price=100&qty=10"));
+    RoundTrip(loop, port, Post("/orders", "side=buy"));  // parse reject
+
+    const std::string m =
+        RoundTrip(loop, port,
+                  "GET /metrics HTTP/1.1\r\nConnection: close\r\n\r\n");
+    REQUIRE(m.rfind("HTTP/1.1 200", 0) == 0);
+    REQUIRE(m.find("text/plain; version=0.0.4") != std::string::npos);
+    REQUIRE(m.find("codicis_orders_received_total 3") != std::string::npos);
+    REQUIRE(m.find("codicis_orders_accepted_total 2") != std::string::npos);
+    REQUIRE(m.find("codicis_orders_rejected_total 1") != std::string::npos);
+    REQUIRE(m.find("codicis_trades_total 1") != std::string::npos);
+    REQUIRE(m.find("codicis_symbols 1") != std::string::npos);
+  }
 }
 
 namespace {

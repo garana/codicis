@@ -588,3 +588,11 @@ Linux (CI/container) during hardening.
       - [ ] Load/soak tests (proposed for the Linux box). (H1 in-process TLS is
             dropped entirely -- TLS is offloaded to an edge proxy; see To
             Design.)
+- [x] Observability: a Prometheus text metrics endpoint (`metrics.enabled`,
+      `metrics.path` default `/metrics`). AppServer keeps single-threaded
+      process counters (orders received/accepted/rejected/backpressure, cancels
+      + failures, auctions, trades, WS messages) and renders them alongside live
+      gauges read from the subsystems (storage outbox depth + report failures,
+      pending placements, live symbols, MD subscribers). No identity required --
+      restrict at the edge. test_app asserts the counters after a resting sell,
+      a crossing buy, and a parse reject.

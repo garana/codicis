@@ -42,6 +42,10 @@ OptionRegistry BuildOptionRegistry() {
                  "listener and submits per-frame 'user' orders");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
+  reg.add_bool("metrics.enabled", true,
+               "Expose a Prometheus text metrics endpoint over HTTP");
+  reg.add_string("metrics.path", "/metrics",
+                 "HTTP path for the Prometheus metrics endpoint");
 
   // Authentication (identity of the requesting user). Two independent,
   // non-exclusive mechanisms; when both are on, both must pass and agree.

@@ -307,6 +307,8 @@ Status AppServer::start() {
   engine_ = std::make_unique<TradingEngine>(matching_, *storage_, mem_levels_);
   outbox_max_ = static_cast<std::size_t>(
       config_.get_int("storage.processed_queue_max").value());
+  metrics_enabled_ = config_.get_bool("metrics.enabled").value();
+  metrics_path_ = config_.get_string("metrics.path").value();
 
   // Authentication: Option A (trusted header) and/or Option B (helper pool).
   auth_header_enabled_ = config_.get_bool("auth.header.enabled").value();
@@ -450,13 +452,23 @@ void AppServer::setup_routes() {
                                          HttpResponse& p) {
     handle_auction(r, p);
   });
+  // Prometheus metrics (configurable path; no identity required -- restrict it
+  // at the edge like /health and /book).
+  if (metrics_enabled_) {
+    router_.add("GET", metrics_path_,
+                [this](const HttpRequest& r, HttpResponse& p) {
+                  handle_metrics(r, p);
+                });
+  }
 }
 
 void AppServer::handle_submit(const HttpRequest& req,
                               const HttpResponder& respond) {
+  ++metrics_.orders_received;
   // Backpressure: if the storage processed-queue (un-committed reports) is
   // full, shed new orders with 503 rather than growing memory without bound.
   if (outbox_max_ > 0 && storage_->processed_pending() >= outbox_max_) {
+    ++metrics_.orders_backpressure;
     HttpResponse resp;
     resp.set_header("Retry-After", "1");
     JsonError(resp, 503, "storage backpressure: retry");
@@ -469,6 +481,7 @@ void AppServer::handle_submit(const HttpRequest& req,
   Order order;  // the engine assigns the id
   std::string err;
   if (!ParseOrderForm(ParseForm(req.body), &symbol, &order, &err)) {
+    ++metrics_.orders_rejected;
     HttpResponse resp;
     JsonError(resp, 400, err);
     respond(std::move(resp));
@@ -480,6 +493,7 @@ void AppServer::handle_submit(const HttpRequest& req,
                         bool ok, int status, const std::string& owner,
                         const std::string& auth_err) {
     if (!ok) {
+      ++metrics_.orders_rejected;
       HttpResponse resp;
       JsonError(resp, status, auth_err);
       respond(std::move(resp));
@@ -494,10 +508,14 @@ void AppServer::handle_submit(const HttpRequest& req,
           resp.set_header("Content-Type", "application/json");
           if (!res.storage_ok) {
             resp.set_status(503);
+            ++metrics_.orders_rejected;
           } else if (!res.outcome.accepted) {
             resp.set_status(409);
+            ++metrics_.orders_rejected;
           } else {
             resp.set_status(200);
+            ++metrics_.orders_accepted;
+            metrics_.trades += res.outcome.trades.size();
           }
           resp.body = ResultBody(res);
           respond(std::move(resp));
@@ -510,6 +528,7 @@ void AppServer::handle_submit(const HttpRequest& req,
 
 void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
                                   std::string_view payload) {
+  ++metrics_.ws_messages;
   const auto form = ParseForm(payload);
 
   // A per-symbol market-data subscription request (rather than an order).
@@ -537,12 +556,15 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
   Symbol symbol;
   Order order;
   std::string err;
+  ++metrics_.orders_received;
   if (!ParseOrderForm(form, &symbol, &order, &err)) {
+    ++metrics_.orders_rejected;
     conn.send_text(JsonErrorBody(err));
     return;
   }
   // Backpressure: shed new orders when the storage processed-queue is full.
   if (outbox_max_ > 0 && storage_->processed_pending() >= outbox_max_) {
+    ++metrics_.orders_backpressure;
     conn.send_text(JsonErrorBody("storage backpressure: retry"));
     return;
   }
@@ -552,6 +574,7 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
   if (conn_perframe_.count(conn.id()) > 0) {
     const std::string* user = FormGet(form, "user");
     if (user == nullptr || !IsValidUuidString(*user)) {
+      ++metrics_.orders_rejected;
       conn.send_text(JsonErrorBody("missing or invalid user"));
       return;
     }
@@ -559,6 +582,7 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
   } else {
     const auto oit = conn_owner_.find(conn.id());
     if (oit == conn_owner_.end()) {
+      ++metrics_.orders_rejected;
       conn.send_text(JsonErrorBody("unauthenticated"));
       return;
     }
@@ -569,6 +593,12 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
   engine_->submit(
       symbol, owner, order,
       [this, symbol, fd, id](const TradingEngine::Result& res) {
+        if (!res.storage_ok || !res.outcome.accepted) {
+          ++metrics_.orders_rejected;
+        } else {
+          ++metrics_.orders_accepted;
+          metrics_.trades += res.outcome.trades.size();
+        }
         ws_->deliver_text(fd, id, ResultBody(res));
         if (res.storage_ok && res.outcome.accepted) {
           broadcast_market_data(symbol, res.outcome.trades);
@@ -600,6 +630,7 @@ void AppServer::handle_cancel(const HttpRequest& req,
       respond(std::move(resp));
       return;
     }
+    ++metrics_.cancels;
     Symbol symbol;
     switch (engine_->cancel(handle, owner, &symbol)) {
       case CancelResult::kOk:
@@ -608,9 +639,11 @@ void AppServer::handle_cancel(const HttpRequest& req,
         broadcast_market_data(symbol, {});  // the top of book may have changed
         break;
       case CancelResult::kNotFound:
+        ++metrics_.cancels_failed;
         JsonError(resp, 404, "unknown order");
         break;
       case CancelResult::kForbidden:
+        ++metrics_.cancels_failed;
         JsonError(resp, 403, "not the order owner");
         break;
     }
@@ -714,6 +747,8 @@ void AppServer::handle_auction(const HttpRequest& req, HttpResponse& resp) {
   std::vector<Trade> result;
   engine_->run_auction(symbol, opening,
                        [&](const std::vector<Trade>& t) { result = t; });
+  ++metrics_.auctions;
+  metrics_.trades += result.size();
 
   std::ostringstream body;
   body << "{\"phase\":\"" << *phase << "\",\"symbol\":\"" << symbol
@@ -731,6 +766,61 @@ void AppServer::handle_auction(const HttpRequest& req, HttpResponse& resp) {
   resp.set_header("Content-Type", "application/json");
   resp.body = body.str();
   broadcast_market_data(symbol, result);  // top of book + prints changed
+}
+
+void AppServer::handle_metrics(const HttpRequest& /*req*/, HttpResponse& resp) {
+  // Prometheus text exposition format (version 0.0.4). Counters are the
+  // monotonic tallies in metrics_; gauges are read live from the subsystems.
+  std::size_t md_subs = 0;
+  for (const auto& [sym, conns] : md_subscribers_) {
+    md_subs += conns.size();
+  }
+  const auto line = [](std::ostringstream& o, const char* name, const char* type,
+                       const char* help, std::uint64_t value) {
+    o << "# HELP " << name << ' ' << help << '\n'
+      << "# TYPE " << name << ' ' << type << '\n'
+      << name << ' ' << value << '\n';
+  };
+
+  std::ostringstream o;
+  line(o, "codicis_orders_received_total", "counter",
+       "Orders received over REST and WebSocket.", metrics_.orders_received);
+  line(o, "codicis_orders_accepted_total", "counter",
+       "Orders accepted (matched or rested).", metrics_.orders_accepted);
+  line(o, "codicis_orders_rejected_total", "counter",
+       "Orders rejected (parse, auth, or engine).", metrics_.orders_rejected);
+  line(o, "codicis_orders_backpressure_total", "counter",
+       "Orders shed with 503 due to a full storage outbox.",
+       metrics_.orders_backpressure);
+  line(o, "codicis_cancels_total", "counter", "Cancel requests received.",
+       metrics_.cancels);
+  line(o, "codicis_cancels_failed_total", "counter",
+       "Cancels rejected (unknown order or not the owner).",
+       metrics_.cancels_failed);
+  line(o, "codicis_auctions_total", "counter", "Session auction crosses run.",
+       metrics_.auctions);
+  line(o, "codicis_trades_total", "counter", "Trade prints produced.",
+       metrics_.trades);
+  line(o, "codicis_ws_messages_total", "counter", "WebSocket frames handled.",
+       metrics_.ws_messages);
+  line(o, "codicis_storage_processed_pending", "gauge",
+       "Un-committed reports queued for the storage helper.",
+       storage_ ? storage_->processed_pending() : 0);
+  line(o, "codicis_storage_report_failures_total", "counter",
+       "Storage report failures surfaced by the engine.",
+       engine_ ? engine_->report_failures() : 0);
+  line(o, "codicis_pending_placements", "gauge",
+       "Orders staged awaiting a storage ack before placement.",
+       engine_ ? engine_->pending_placements() : 0);
+  line(o, "codicis_symbols", "gauge", "Instruments with a live order book.",
+       matching_.symbol_count());
+  line(o, "codicis_md_subscribers", "gauge",
+       "Active market-data WebSocket subscriptions.", md_subs);
+
+  resp.set_status(200);
+  // Prometheus expects this exact content type for the text format.
+  resp.set_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+  resp.body = o.str();
 }
 
 void AppServer::broadcast_market_data(const Symbol& symbol,

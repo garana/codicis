@@ -82,6 +82,9 @@ class AppServer : public TimerHandler {
   /** @brief Run a symbol's opening/closing auction and report the prints. */
   void handle_auction(const HttpRequest& req, HttpResponse& resp);
 
+  /** @brief Render process metrics in Prometheus text exposition format. */
+  void handle_metrics(const HttpRequest& req, HttpResponse& resp);
+
   /** @brief Submit an order received over a WebSocket and stream the result. */
   void handle_ws_message(WsConnection& conn, bool is_binary,
                          std::string_view payload);
@@ -125,6 +128,25 @@ class AppServer : public TimerHandler {
 
   std::size_t mem_levels_ = 0;  // resident-window bound (0 = unbounded)
   std::size_t outbox_max_ = 0;  // un-committed reports before 503 (0=unbounded)
+
+  /**
+   * @brief Monotonic process counters exported at the metrics endpoint. The
+   * event loop is single-threaded, so plain integers need no synchronization.
+   */
+  struct Metrics {
+    std::uint64_t orders_received = 0;      // POST /orders + WS order frames
+    std::uint64_t orders_accepted = 0;      // matched or rested
+    std::uint64_t orders_rejected = 0;      // parse/auth/engine rejects
+    std::uint64_t orders_backpressure = 0;  // shed with 503 (full outbox)
+    std::uint64_t cancels = 0;              // cancel requests
+    std::uint64_t cancels_failed = 0;       // unknown / not-owner cancels
+    std::uint64_t auctions = 0;             // auction crosses run
+    std::uint64_t trades = 0;               // trade prints produced
+    std::uint64_t ws_messages = 0;          // WS frames handled
+  };
+  Metrics metrics_;
+  bool metrics_enabled_ = false;
+  std::string metrics_path_;
   MatchingEngine matching_;
   HttpRouter router_;
   std::unique_ptr<HelperCodec> codec_;

@@ -47,6 +47,12 @@ whenever that book changes, e.g.
 `{"type":"md","symbol":"BTC","bid":null,"bid_qty":0,"ask":100,"ask_qty":6,"trades":[{"price":100,"qty":4}]}`.
 Send `action=unsubscribe&symbol=BTC` to stop.
 
+A Prometheus text metrics endpoint is served at a configurable path (default
+`GET /metrics`, toggle with `metrics.enabled`). It exposes order/cancel/auction
+counters, trade prints, and gauges for the storage outbox depth, pending
+placements, live symbols, and market-data subscribers. It carries no identity,
+so restrict it at the edge like `/health` and `/book`.
+
 Every option is also settable via a config file (see
 `config/codicis.example.conf`); CLI flags override file values.
 
