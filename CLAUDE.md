@@ -573,6 +573,18 @@ Linux (CI/container) during hardening.
       - [x] Bounded outbox + backpressure: `storage.processed_queue_max` caps
             the un-committed processed queue; AppServer sheds new orders (REST +
             WS) with HTTP 503 + Retry-After when it is full.
-      - [ ] Parser fuzzing (HTTP/WS/helper-codec adversarial input), load/soak
-            tests. (H1 in-process TLS is dropped entirely -- TLS is offloaded to
-            an edge proxy; see To Design.)
+      - [x] HTTP parser hardening: request-smuggling defenses (conflicting
+            duplicate Content-Length, CL+TE together, CL overflow) and RFC 7230
+            character validation (non-token method/header-name, control chars in
+            target/value, obs-fold rejection). Adversarial test_http_parser
+            cases.
+      - [x] WebSocket frame + reassembly hardening: reject set RSV bits and
+            unmasked client frames (require_masked), a data frame arriving
+            mid-reassembly, and a fragmented message past a 64 MiB cap; explicit
+            16 MiB per-frame cap. Adversarial test_ws cases.
+      - [x] Helper-codec hardening: text-record 64 MiB cap (no-terminator
+            memory-exhaustion guard) + req_id overflow/length rejection; binary
+            codec overrun guards locked in by adversarial test_ipc cases.
+      - [ ] Load/soak tests (proposed for the Linux box). (H1 in-process TLS is
+            dropped entirely -- TLS is offloaded to an edge proxy; see To
+            Design.)
