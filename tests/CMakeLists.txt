@@ -41,6 +41,10 @@ codicis_add_test(test_net_epoll
   unit/test_net_epoll.cc)
 target_link_libraries(test_net_epoll PRIVATE codicis_net)
 
+codicis_add_test(test_net_soak
+  unit/test_net_soak.cc)
+target_link_libraries(test_net_soak PRIVATE codicis_net)
+
 codicis_add_test(test_order_book
   unit/test_order_book.cc)
 target_link_libraries(test_order_book PRIVATE codicis_core)
