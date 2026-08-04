@@ -5,6 +5,7 @@
 
 #include "codicis/ipc/helper_codec.h"
 
+#include <cstdint>
 #include <cstring>
 
 namespace codicis {
@@ -12,6 +13,9 @@ namespace {
 
 constexpr std::uint32_t kBinaryMagic = 0x43'4F'44'43;  // "CODC"
 constexpr std::size_t kMaxBinaryPayload = 64 * 1024 * 1024;
+/** @brief Cap on a single text record so a helper that never emits the "\n\n"
+ * terminator cannot grow the receive buffer without bound. */
+constexpr std::size_t kMaxTextRecord = 64 * 1024 * 1024;
 
 /** @brief Append a little-endian 16-bit value. */
 void PutU16(std::string* out, std::uint16_t v) {
@@ -76,6 +80,10 @@ HelperDecode TextHelperCodec::decode(Buffer& in, HelperMessage* out,
   const std::string_view v = in.view();
   const std::size_t term = v.find("\n\n");
   if (term == std::string_view::npos) {
+    if (v.size() > kMaxTextRecord) {
+      *err = "text codec: record exceeds cap without terminator";
+      return HelperDecode::kError;
+    }
     return HelperDecode::kIncomplete;
   }
   const std::string_view block = v.substr(0, term);
@@ -101,13 +109,23 @@ HelperDecode TextHelperCodec::decode(Buffer& in, HelperMessage* out,
     const std::string_view key = line.substr(0, eq);
     const std::string_view value = line.substr(eq + 1);
     if (key == "req_id") {
+      if (value.empty() || value.size() > 20) {  // 20 = digits in UINT64_MAX
+        *err = "text codec: bad req_id";
+        return HelperDecode::kError;
+      }
       msg.req_id = 0;
       for (char c : value) {
         if (c < '0' || c > '9') {
           *err = "text codec: bad req_id";
           return HelperDecode::kError;
         }
-        msg.req_id = msg.req_id * 10 + static_cast<std::uint64_t>(c - '0');
+        const std::uint64_t d = static_cast<std::uint64_t>(c - '0');
+        // Reject overflow past UINT64_MAX rather than silently wrapping.
+        if (msg.req_id > (UINT64_MAX - d) / 10) {
+          *err = "text codec: req_id overflow";
+          return HelperDecode::kError;
+        }
+        msg.req_id = msg.req_id * 10 + d;
       }
       have_req_id = true;
     } else if (key == "type") {

@@ -144,6 +144,79 @@ TEST_CASE("Binary codec rejects a bad magic", "[ipc][codec]") {
   REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
 }
 
+TEST_CASE("Codecs reject adversarial input", "[ipc][codec][hardening]") {
+  HelperMessage out;
+  std::string err;
+
+  SECTION("binary codec rejects an oversize declared payload") {
+    // Valid magic, then a payload length far beyond the 64 MiB cap.
+    std::string wire;
+    wire.push_back('C');
+    wire.push_back('O');
+    wire.push_back('D');
+    wire.push_back('C');
+    for (int i = 0; i < 4; ++i) {
+      wire.push_back(static_cast<char>(0xFF));  // len = 0xFFFFFFFF
+    }
+    Buffer b;
+    b.append(wire);
+    BinaryHelperCodec codec;
+    REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
+  }
+
+  SECTION("binary codec rejects a field length that overruns the payload") {
+    // magic + payload_len covering: req_id(8) type_len(2)=0 count(4)=1
+    // key_len(4) = huge, so the field key overruns the declared payload.
+    std::string payload;
+    for (int i = 0; i < 8; ++i) payload.push_back(0);  // req_id
+    payload.push_back(0);
+    payload.push_back(0);  // type_len = 0
+    payload.push_back(1);
+    payload.push_back(0);
+    payload.push_back(0);
+    payload.push_back(0);  // count = 1
+    payload.push_back(static_cast<char>(0xFF));
+    payload.push_back(static_cast<char>(0xFF));
+    payload.push_back(static_cast<char>(0xFF));
+    payload.push_back(0x7F);  // key_len ~ 2 GiB
+    std::string wire;
+    wire.push_back('C');
+    wire.push_back('O');
+    wire.push_back('D');
+    wire.push_back('C');
+    const std::uint32_t plen = static_cast<std::uint32_t>(payload.size());
+    for (int i = 0; i < 4; ++i) {
+      wire.push_back(static_cast<char>((plen >> (8 * i)) & 0xFF));
+    }
+    wire += payload;
+    Buffer b;
+    b.append(wire);
+    BinaryHelperCodec codec;
+    REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
+  }
+
+  SECTION("text codec rejects a non-numeric req_id") {
+    Buffer b;
+    b.append(std::string("req_id=notanumber\ntype=x\n\n"));
+    TextHelperCodec codec;
+    REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
+  }
+
+  SECTION("text codec rejects an overflowing req_id") {
+    Buffer b;
+    b.append(std::string("req_id=99999999999999999999\ntype=x\n\n"));
+    TextHelperCodec codec;
+    REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
+  }
+
+  SECTION("text codec rejects a line without '='") {
+    Buffer b;
+    b.append(std::string("req_id=1\ngarbage\n\n"));
+    TextHelperCodec codec;
+    REQUIRE(codec.decode(b, &out, &err) == HelperDecode::kError);
+  }
+}
+
 TEST_CASE("HelperClient correlates pipelined out-of-order responses",
           "[ipc][client]") {
   SystemClock clock;
