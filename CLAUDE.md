@@ -554,12 +554,15 @@ Linux (CI/container) during hardening.
             one WsServer, second TcpListener, connections tagged
             `is_aggregator`). A connection accepted there whose handshake
             carries NO identity supplies a `user` uuid on EACH frame (validated
-            per frame), letting one connection multiplex many end-users -- the
-            intended ingress for the client-request aggregator helper. Per-frame
-            is granted ONLY when unauthenticated AND on the aggregator port
-            (else the handshake identity applies as usual). Trust is the
-            network-restricted port; bind it private. test_app: two users trade
-            over one aggregator connection, a frame with no `user` is rejected.
+            per frame), letting one connection multiplex many end-users -- an
+            ingress path for a network-side request aggregator. Per-frame is
+            granted ONLY when unauthenticated AND on the aggregator port (else
+            the handshake identity applies as usual). Trust is the network-
+            restricted port; bind it private (`net.aggregator_ws_bind_address`,
+            empty reuses `net.bind_address`). test_app: two users trade over one
+            aggregator connection, a frame with no `user` is rejected. NB: this
+            is a WebSocket path; the pipe-based [ingress helper] below is the
+            other per-user ingress mechanism.
       - [ ] JWT/PASETO verification at the edge, mTLS, or HMAC request signing
             as alternative/stronger authentication front-ends (see To Design).
 - [~] H2 Hardening (robustness):
@@ -596,3 +599,19 @@ Linux (CI/container) during hardening.
       pending placements, live symbols, MD subscribers). No identity required --
       restrict at the edge. test_app asserts the counters after a resting sell,
       a crossing buy, and a parse reject.
+- [x] Ingress helper (`ingress.helper_cmd`, empty = off): the optional client-
+      request source. Unlike storage/auth helpers (codicis initiates), an
+      ingress helper INITIATES: it pulls order/cancel traffic from its own
+      external system (Kafka/RabbitMQ/SQS/...) and writes requests to its stdout
+      (codicis reads); codicis writes replies to its stdin. New `IngressHelper`
+      (src/ipc) is the server side of the same `HelperCodec` + a
+      `SpawnIngressHelper` (mirrors SpawnHelper's pipe/fork/exec, CLOEXEC+
+      nonblock). AppServer spawns it in start() and routes each request through
+      the SAME engine as REST/WS via `handle_ingress`. Each request carries a
+      per-message `user` (the helper aggregates many end-users; trust = private-
+      pipe managed child) and the order body travels as a single `form` field so
+      an order field named `type` cannot collide with the codec's reserved
+      envelope `type`. Reference `codicis_ingress_helper` (tools/) relays
+      request lines from a file (its stand-in external source). test_app spawns
+      it and confirms a relayed order rests on the book. Reuses the metrics
+      counters.

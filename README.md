@@ -154,8 +154,17 @@ per-frame `user` UUID on each message. That lets one connection multiplex many
 end-users (for an internal request aggregator); the trust comes from the port
 being network-restricted, so bind it to a private/loopback address via
 `net.aggregator_ws_bind_address` (empty reuses `net.bind_address`) and its own
-`net.aggregator_ws_port`. An optional ingress helper (`ingress.helper_cmd`) is
-the intended producer for that listener.
+`net.aggregator_ws_port`.
+
+A second, independent per-user ingress path is the optional **ingress helper**
+(`ingress.helper_cmd`): a spawned child process that is the source of order and
+cancel traffic (pulled from its own external system -- Kafka, RabbitMQ, SQS,
+...). It speaks the same helper codec as the storage helper but *initiates*,
+writing requests to its stdout (codicis reads) and reading replies on its stdin;
+each request carries its own `user`. Trust comes from it being a private-pipe
+managed child. The reference `codicis_ingress_helper` relays request lines from
+a file. This is a pipe helper, not a WebSocket client -- distinct from the
+aggregator listener above.
 
 Configuration keys (all under `auth.`; CLI/file share names):
 

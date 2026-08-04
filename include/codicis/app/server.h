@@ -34,6 +34,7 @@
 #include "codicis/util/clock.h"
 #include "codicis/ipc/helper_client.h"
 #include "codicis/ipc/helper_codec.h"
+#include "codicis/ipc/ingress_helper.h"
 #include "codicis/ipc/storage_client.h"
 #include "codicis/net/http_server.h"
 #include "codicis/net/router.h"
@@ -84,6 +85,15 @@ class AppServer : public TimerHandler {
 
   /** @brief Render process metrics in Prometheus text exposition format. */
   void handle_metrics(const HttpRequest& req, HttpResponse& resp);
+
+  /**
+   * @brief Handle one request initiated by the ingress helper.
+   *
+   * A `submit`/`cancel` request carries its own per-message `user` identity
+   * (the helper aggregates many end-users); it is routed through the same
+   * engine as REST/WS and the outcome is returned via @p reply.
+   */
+  void handle_ingress(const HelperMessage& req, IngressHelper::Reply reply);
 
   /** @brief Submit an order received over a WebSocket and stream the result. */
   void handle_ws_message(WsConnection& conn, bool is_binary,
@@ -155,6 +165,7 @@ class AppServer : public TimerHandler {
   std::unique_ptr<TradingEngine> engine_;
   std::unique_ptr<HttpServer> http_;
   std::unique_ptr<WsServer> ws_;
+  std::unique_ptr<IngressHelper> ingress_;  // optional client-request source
 
   // Authentication (identity of the requesting user).
   bool auth_header_enabled_ = false;

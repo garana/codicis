@@ -3,6 +3,7 @@
 add_library(codicis_ipc STATIC
   helper_codec.cc
   helper_client.cc
+  ingress_helper.cc
   storage_client.cc)
 
 target_include_directories(codicis_ipc PUBLIC

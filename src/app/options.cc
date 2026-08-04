@@ -38,8 +38,9 @@ OptionRegistry BuildOptionRegistry() {
                     "backpressure (0 disables)");
   reg.add_string("ingress.helper_cmd", "",
                  "Command to launch the optional client-request ingress helper "
-                 "(empty = disabled). It connects to the aggregator WebSocket "
-                 "listener and submits per-frame 'user' orders");
+                 "(empty = disabled). codicis spawns it and reads order/cancel "
+                 "requests it initiates over the helper codec (stdout), each "
+                 "carrying a per-message 'user'");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
   reg.add_bool("metrics.enabled", true,

@@ -79,6 +79,7 @@ add_subdirectory(src/engine)
 add_subdirectory(src/app)
 add_subdirectory(tools/storage_helper)
 add_subdirectory(tools/auth_helper)
+add_subdirectory(tools/ingress_helper)
 
 # ---- Tests -----------------------------------------------------------------
 

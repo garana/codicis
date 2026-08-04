@@ -401,6 +401,29 @@ Status AppServer::start() {
     }
   }
 
+  // Optional client-request ingress helper: a spawned, managed child that is
+  // the source of order/cancel traffic (from Kafka/RabbitMQ/... -- its own
+  // concern). It initiates requests over the same helper codec; each carries a
+  // per-message `user`, trusted because it is a private-pipe child.
+  const std::string ingress_cmd =
+      config_.get_string("ingress.helper_cmd").value();
+  if (!ingress_cmd.empty()) {
+    std::vector<std::string> iargv = Split(ingress_cmd, ' ');
+    if (iargv.empty()) {
+      return Status(
+          MakeError(ErrorCode::kInvalidArg, "empty ingress.helper_cmd"));
+    }
+    Result<std::unique_ptr<IngressHelper>> ir = SpawnIngressHelper(
+        loop_, iargv, *codec_,
+        [this](const HelperMessage& req, IngressHelper::Reply reply) {
+          handle_ingress(req, std::move(reply));
+        });
+    if (!ir.ok()) {
+      return ir.error();
+    }
+    ingress_ = std::move(ir.value());
+  }
+
   const std::int64_t interval_ms =
       config_.get_int("storage.commit_interval_ms").value();
   commit_timer_ = loop_.add_timer(interval_ms * 1'000'000, /*repeat=*/true,
@@ -821,6 +844,98 @@ void AppServer::handle_metrics(const HttpRequest& /*req*/, HttpResponse& resp) {
   // Prometheus expects this exact content type for the text format.
   resp.set_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
   resp.body = o.str();
+}
+
+void AppServer::handle_ingress(const HelperMessage& req,
+                               IngressHelper::Reply reply) {
+  // Identity is per message (the helper aggregates many end-users); trust comes
+  // from it being a private-pipe managed child, as with the aggregator port.
+  const auto fail = [&reply](const std::string& err) {
+    HelperMessage m;
+    m.type = "result";
+    m.set("ok", "false");
+    m.set("error", err);
+    reply(std::move(m));
+  };
+  // The request body is one `form` field (avoids colliding an order field named
+  // `type` with the codec's reserved envelope `type`).
+  const std::string* form_field = FormGet(req.fields, "form");
+  const auto form = ParseForm(form_field != nullptr ? *form_field : "");
+  const std::string* user = FormGet(form, "user");
+  if (user == nullptr || !IsValidUuidString(*user)) {
+    ++metrics_.orders_rejected;
+    fail("missing or invalid user");
+    return;
+  }
+  const std::string owner = *user;
+
+  if (req.type == "cancel") {
+    ++metrics_.cancels;
+    const std::string* handle = FormGet(form, "order");
+    if (handle == nullptr || !IsValidUuidString(*handle)) {
+      ++metrics_.cancels_failed;
+      fail("missing or invalid order");
+      return;
+    }
+    Symbol symbol;
+    HelperMessage m;
+    m.type = "result";
+    switch (engine_->cancel(*handle, owner, &symbol)) {
+      case CancelResult::kOk:
+        m.set("ok", "true");
+        m.set("cancelled", "true");
+        broadcast_market_data(symbol, {});
+        break;
+      case CancelResult::kNotFound:
+        ++metrics_.cancels_failed;
+        m.set("ok", "false");
+        m.set("error", "unknown order");
+        break;
+      case CancelResult::kForbidden:
+        ++metrics_.cancels_failed;
+        m.set("ok", "false");
+        m.set("error", "not the order owner");
+        break;
+    }
+    reply(std::move(m));
+    return;
+  }
+
+  // Otherwise treat the message as an order submission (type "submit" or empty).
+  ++metrics_.orders_received;
+  if (outbox_max_ > 0 && storage_->processed_pending() >= outbox_max_) {
+    ++metrics_.orders_backpressure;
+    fail("storage backpressure: retry");
+    return;
+  }
+  Symbol symbol;
+  Order order;
+  std::string err;
+  if (!ParseOrderForm(form, &symbol, &order, &err)) {
+    ++metrics_.orders_rejected;
+    fail(err);
+    return;
+  }
+  // Report-before-place through the same engine as REST/WS; reply on placement.
+  engine_->submit(
+      symbol, owner, order,
+      [this, symbol, reply](const TradingEngine::Result& res) {
+        const bool ok = res.storage_ok && res.outcome.accepted;
+        if (!ok) {
+          ++metrics_.orders_rejected;
+        } else {
+          ++metrics_.orders_accepted;
+          metrics_.trades += res.outcome.trades.size();
+        }
+        HelperMessage m;
+        m.type = "result";
+        m.set("ok", ok ? "true" : "false");
+        m.set("body", ResultBody(res));
+        reply(std::move(m));
+        if (ok) {
+          broadcast_market_data(symbol, res.outcome.trades);
+        }
+      });
 }
 
 void AppServer::broadcast_market_data(const Symbol& symbol,

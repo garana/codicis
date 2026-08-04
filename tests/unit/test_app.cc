@@ -22,6 +22,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -635,4 +636,55 @@ TEST_CASE("Aggregator WS connections carry per-frame user identity",
   REQUIRE(r3.find("missing or invalid user") != std::string::npos);
 
   ::close(c);
+}
+
+TEST_CASE("Ingress helper feeds orders into codicis", "[app][ingress]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  // The ingress helper's "external source": a file of request lines. codicis
+  // spawns the helper with this path; the helper relays each line as a
+  // per-`user` order over the helper pipe.
+  const std::string input_path = "codicis_ingress_it_input.txt";
+  const std::string user = "33333333-3333-4333-8333-333333333333";
+  {
+    std::ofstream f(input_path, std::ios::trunc);
+    f << "submit user=" << user
+      << "&symbol=BTC&side=sell&type=limit&price=100&qty=7\n";
+  }
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string storage = StorageFlag();
+  const std::string ingress_flag = std::string("--ingress.helper_cmd=") +
+                                   CODICIS_INGRESS_HELPER_PATH + " " +
+                                   input_path;
+  std::vector<const char*> argv = {"codicis", "--net.http_port=0",
+                                   "--net.ws_port=0", storage.c_str(),
+                                   ingress_flag.c_str()};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t port = server.http_port();
+  REQUIRE(port != 0);
+
+  // Pump the loop so the helper emits the order and codicis reports-then-places
+  // it; the resting ask then shows up on the book.
+  std::string book;
+  for (int i = 0; i < 50; ++i) {
+    for (int j = 0; j < 20; ++j) {
+      loop.run_once(5);
+    }
+    book = RoundTrip(loop, port,
+                     "GET /book?symbol=BTC HTTP/1.1\r\nConnection: close\r\n\r\n");
+    if (book.find("\"ask\":100") != std::string::npos) {
+      break;
+    }
+  }
+  REQUIRE(book.find("\"ask\":100") != std::string::npos);
+
+  ::remove(input_path.c_str());
 }
