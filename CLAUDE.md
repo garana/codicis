@@ -549,6 +549,17 @@ Linux (CI/container) during hardening.
             WS identity is resolved once at the handshake. Reference
             `codicis_auth_helper`. Covered by test_token_cache, test_auth, and
             auth cases in test_app; verified live.
+      - [x] Aggregator WebSocket (per-frame identity): an optional second WS
+            listener (`net.aggregator_ws_enabled` + `net.aggregator_ws_port`,
+            one WsServer, second TcpListener, connections tagged
+            `is_aggregator`). A connection accepted there whose handshake
+            carries NO identity supplies a `user` uuid on EACH frame (validated
+            per frame), letting one connection multiplex many end-users -- the
+            intended ingress for the client-request aggregator helper. Per-frame
+            is granted ONLY when unauthenticated AND on the aggregator port
+            (else the handshake identity applies as usual). Trust is the
+            network-restricted port; bind it private. test_app: two users trade
+            over one aggregator connection, a frame with no `user` is rejected.
       - [ ] JWT/PASETO verification at the edge, mTLS, or HMAC request signing
             as alternative/stronger authentication front-ends (see To Design).
 - [~] H2 Hardening (robustness):

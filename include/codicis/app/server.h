@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "codicis/auth/auth_client.h"
@@ -66,6 +67,9 @@ class AppServer : public TimerHandler {
 
   /** @return The bound WebSocket port (valid after a successful @ref start). */
   std::uint16_t ws_port() const;
+
+  /** @return The bound aggregator WS port (0 if not enabled). */
+  std::uint16_t aggregator_ws_port() const;
 
   void on_timer(TimerId id) override;
 
@@ -140,6 +144,9 @@ class AppServer : public TimerHandler {
 
   // Per-connection authenticated owner (present once a WS handshake resolves).
   std::unordered_map<std::uint64_t, std::string> conn_owner_;
+  // Aggregator connections (internal port, unauthenticated handshake) that
+  // supply a per-frame `user` uuid instead of a single connection identity.
+  std::unordered_set<std::uint64_t> conn_perframe_;
 
   // Market-data subscribers per symbol: symbol -> (connection id -> fd).
   std::unordered_map<Symbol, std::unordered_map<std::uint64_t, int>>

@@ -368,6 +368,7 @@ Status AppServer::start() {
       },
       [this](std::uint64_t id) {
         conn_owner_.erase(id);
+        conn_perframe_.erase(id);
         for (auto& [symbol, subs] : md_subscribers_) {
           subs.erase(id);
         }
@@ -379,6 +380,15 @@ Status AppServer::start() {
       config_.get_int("net.ws_port").value());
   if (Status s = ws_->listen(addr, ws_port_cfg); !s.ok()) {
     return s;
+  }
+  // Optional internal aggregator listener (per-frame identity). Bind it to a
+  // private address; access-control it at the network layer.
+  if (config_.get_bool("net.aggregator_ws_enabled").value()) {
+    const auto agg_port_cfg = static_cast<std::uint16_t>(
+        config_.get_int("net.aggregator_ws_port").value());
+    if (Status s = ws_->listen_aggregator(addr, agg_port_cfg); !s.ok()) {
+      return s;
+    }
   }
 
   const std::int64_t interval_ms =
@@ -398,6 +408,10 @@ std::uint16_t AppServer::http_port() const {
 }
 
 std::uint16_t AppServer::ws_port() const { return ws_ ? ws_->port() : 0; }
+
+std::uint16_t AppServer::aggregator_ws_port() const {
+  return ws_ ? ws_->aggregator_port() : 0;
+}
 
 void AppServer::on_timer(TimerId /*id*/) {
   if (storage_ && storage_->processed_pending() > 0) {
@@ -524,14 +538,24 @@ void AppServer::handle_ws_message(WsConnection& conn, bool /*is_binary*/,
     conn.send_text(JsonErrorBody("storage backpressure: retry"));
     return;
   }
-  // Identity is per-connection, resolved once at the handshake (Option A/B) or
-  // anonymous when auth is disabled. A missing entry means it did not resolve.
-  const auto oit = conn_owner_.find(conn.id());
-  if (oit == conn_owner_.end()) {
-    conn.send_text(JsonErrorBody("unauthenticated"));
-    return;
+  // Identity: a per-frame `user` on an aggregator connection, otherwise the
+  // single owner bound at the handshake.
+  std::string owner;
+  if (conn_perframe_.count(conn.id()) > 0) {
+    const std::string* user = FormGet(form, "user");
+    if (user == nullptr || !IsValidUuidString(*user)) {
+      conn.send_text(JsonErrorBody("missing or invalid user"));
+      return;
+    }
+    owner = *user;
+  } else {
+    const auto oit = conn_owner_.find(conn.id());
+    if (oit == conn_owner_.end()) {
+      conn.send_text(JsonErrorBody("unauthenticated"));
+      return;
+    }
+    owner = oit->second;
   }
-  const std::string owner = oit->second;
   const int fd = conn.fd();
   const std::uint64_t id = conn.id();
   engine_->submit(
@@ -588,6 +612,16 @@ void AppServer::handle_cancel(const HttpRequest& req,
 
 void AppServer::on_ws_open(WsConnection& conn, const HttpRequest& handshake) {
   const std::uint64_t id = conn.id();
+  // Per-frame identity is granted only to an aggregator-port connection whose
+  // handshake carried NO identity: it then supplies a `user` uuid on each
+  // frame. Trust comes from the internal aggregator port (network-restricted).
+  const bool auth_provided =
+      handshake.header(auth_header_name_) != nullptr ||
+      handshake.header(auth_credential_header_) != nullptr;
+  if (conn.is_aggregator() && !auth_provided) {
+    conn_perframe_.insert(id);
+    return;
+  }
   authenticate(handshake, [this, id](bool ok, int /*status*/,
                                      const std::string& owner,
                                      const std::string& /*err*/) {

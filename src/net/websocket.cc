@@ -23,13 +23,15 @@ constexpr std::size_t kReadChunk = 16 * 1024;
 
 WsConnection::WsConnection(EventLoop& loop, int fd, std::uint64_t id,
                            WsMessageFn on_message,
-                           std::function<void(int)> on_close, WsOpenFn on_open)
+                           std::function<void(int)> on_close, WsOpenFn on_open,
+                           bool aggregator)
     : loop_(loop),
       fd_(fd),
       id_(id),
       on_message_(std::move(on_message)),
       on_close_(std::move(on_close)),
-      on_open_(std::move(on_open)) {}
+      on_open_(std::move(on_open)),
+      aggregator_(aggregator) {}
 
 WsConnection::~WsConnection() {
   if (fd_ >= 0) {
@@ -258,7 +260,7 @@ WsServer::~WsServer() = default;
 
 Status WsServer::listen(const std::string& addr, std::uint16_t port) {
   Result<std::unique_ptr<TcpListener>> lr = TcpListener::Create(
-      loop_, addr, port, [this](int fd) { on_accept(fd); });
+      loop_, addr, port, [this](int fd) { on_accept(fd, /*aggregator=*/false); });
   if (!lr.ok()) {
     return lr.error();
   }
@@ -266,15 +268,30 @@ Status WsServer::listen(const std::string& addr, std::uint16_t port) {
   return Status::Ok();
 }
 
+Status WsServer::listen_aggregator(const std::string& addr,
+                                   std::uint16_t port) {
+  Result<std::unique_ptr<TcpListener>> lr = TcpListener::Create(
+      loop_, addr, port, [this](int fd) { on_accept(fd, /*aggregator=*/true); });
+  if (!lr.ok()) {
+    return lr.error();
+  }
+  agg_listener_ = std::move(lr.value());
+  return Status::Ok();
+}
+
 std::uint16_t WsServer::port() const {
   return listener_ ? listener_->port() : 0;
 }
 
-void WsServer::on_accept(int fd) {
+std::uint16_t WsServer::aggregator_port() const {
+  return agg_listener_ ? agg_listener_->port() : 0;
+}
+
+void WsServer::on_accept(int fd, bool aggregator) {
   const std::uint64_t id = next_conn_id_++;
   auto conn = std::make_unique<WsConnection>(
       loop_, fd, id, on_message_, [this](int cfd) { close_connection(cfd); },
-      on_open_);
+      on_open_, aggregator);
   if (Status s = loop_.add(fd, IoInterest::kRead, conn.get()); !s.ok()) {
     return;  // conn destructs, closing fd.
   }

@@ -141,7 +141,12 @@ When **both** are enabled, a request must pass both and they must resolve to
 the **same** UUID, otherwise it is rejected (403). A missing or malformed
 identity is 401; a failed or mismatched validation is 403. `GET /health` and
 `GET /book` require no identity. Over WebSocket, identity is resolved once from
-the handshake headers and applies to every order on that connection.
+the handshake headers and applies to every order on that connection -- except
+on the optional internal **aggregator** listener (`net.aggregator_ws_enabled`),
+where a connection whose handshake carries no identity instead supplies a
+per-frame `user` UUID on each message. That lets one connection multiplex many
+end-users (for an internal request aggregator); the trust comes from the port
+being network-restricted, so bind it to a private/loopback address.
 
 Configuration keys (all under `auth.`; CLI/file share names):
 

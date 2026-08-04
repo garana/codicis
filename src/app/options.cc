@@ -13,6 +13,11 @@ OptionRegistry BuildOptionRegistry() {
                     "TCP port for the HTTP REST API (0 = ephemeral)");
   reg.add_int_range("net.ws_port", 8081, 0, 65535,
                     "TCP port for the WebSocket API (0 = ephemeral)");
+  reg.add_bool("net.aggregator_ws_enabled", false,
+               "Enable the internal aggregator WebSocket listener (per-frame "
+               "'user' identity when the handshake is unauthenticated)");
+  reg.add_int_range("net.aggregator_ws_port", 8082, 0, 65535,
+                    "Port for the aggregator WebSocket listener (0 = ephemeral)");
   reg.add_string("net.bind_address", "127.0.0.1",
                  "IPv4 address to bind listeners to");
   reg.add_int_range("book.mem_levels", 100, 1, 1'000'000,

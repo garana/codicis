@@ -568,3 +568,51 @@ TEST_CASE("A full storage processed-queue sheds new orders with 503",
   REQUIRE(over.rfind("HTTP/1.1 503", 0) == 0);
   REQUIRE(over.find("backpressure") != std::string::npos);
 }
+
+TEST_CASE("Aggregator WS connections carry per-frame user identity",
+          "[app][ws][h2]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  const OptionRegistry reg = BuildOptionRegistry();
+  const std::string storage = StorageFlag();
+  std::vector<const char*> argv = {"codicis",
+                                   "--net.http_port=0",
+                                   "--net.ws_port=0",
+                                   storage.c_str(),
+                                   "--net.aggregator_ws_enabled=true",
+                                   "--net.aggregator_ws_port=0"};
+  Result<Config> cfg =
+      Config::load(reg, static_cast<int>(argv.size()), argv.data());
+  REQUIRE(cfg.ok());
+  AppServer server(loop, cfg.value());
+  REQUIRE(server.start().ok());
+  const std::uint16_t agg = server.aggregator_ws_port();
+  REQUIRE(agg != 0);
+
+  // Connect to the internal aggregator port (handshake carries no identity).
+  const int c = WsConnect(loop, agg);
+
+  const std::string userA = "11111111-1111-4111-8111-111111111111";
+  const std::string userB = "22222222-2222-4222-8222-222222222222";
+
+  // Two different users' orders multiplexed over the SAME connection.
+  const std::string r1 = WsSubmit(
+      loop, c,
+      "symbol=BTC&side=sell&type=limit&price=100&qty=10&user=" + userA);
+  REQUIRE(r1.find("\"accepted\":true") != std::string::npos);
+
+  const std::string r2 = WsSubmit(
+      loop, c,
+      "symbol=BTC&side=buy&type=limit&price=100&qty=10&user=" + userB);
+  REQUIRE(r2.find("\"filled\":10") != std::string::npos);  // B crosses A
+
+  // A frame without a user is rejected on the aggregator port.
+  const std::string r3 =
+      WsSubmit(loop, c, "symbol=BTC&side=sell&type=limit&price=101&qty=5");
+  REQUIRE(r3.find("missing or invalid user") != std::string::npos);
+
+  ::close(c);
+}

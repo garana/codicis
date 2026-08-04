@@ -69,10 +69,11 @@ class WsConnection final : public IoHandler {
    * @param on_message Message callback.
    * @param on_close   Owner callback invoked once when the connection closes.
    * @param on_open    Optional callback invoked once the handshake succeeds.
+   * @param aggregator True if accepted on the internal aggregator listener.
    */
   WsConnection(EventLoop& loop, int fd, std::uint64_t id,
                WsMessageFn on_message, std::function<void(int)> on_close,
-               WsOpenFn on_open = {});
+               WsOpenFn on_open = {}, bool aggregator = false);
 
   ~WsConnection() override;
 
@@ -106,6 +107,9 @@ class WsConnection final : public IoHandler {
   /** @return True once the opening handshake has completed. */
   bool is_open() const { return open_; }
 
+  /** @return True if accepted on the internal aggregator listener. */
+  bool is_aggregator() const { return aggregator_; }
+
  private:
   void on_readable();
   void on_writable();
@@ -122,6 +126,7 @@ class WsConnection final : public IoHandler {
   WsMessageFn on_message_;
   std::function<void(int)> on_close_;
   WsOpenFn on_open_;
+  bool aggregator_ = false;
 
   Buffer in_;
   Buffer out_;
@@ -169,8 +174,23 @@ class WsServer {
    */
   Status listen(const std::string& addr, std::uint16_t port);
 
+  /**
+   * @brief Begin listening on a second, "aggregator" port.
+   *
+   * Connections accepted here are tagged (@ref WsConnection::is_aggregator) so
+   * the owner can grant them per-frame identity. Intended for internal
+   * aggregators; bind it to a private/loopback address.
+   * @param addr Dotted IPv4 bind address.
+   * @param port Bind port; 0 selects an ephemeral port.
+   * @return Ok, or an Error on socket setup failure.
+   */
+  Status listen_aggregator(const std::string& addr, std::uint16_t port);
+
   /** @return The bound port (valid after a successful @ref listen). */
   std::uint16_t port() const;
+
+  /** @return The bound aggregator port (valid after @ref listen_aggregator). */
+  std::uint16_t aggregator_port() const;
 
   /** @return The number of currently open connections. */
   std::size_t connection_count() const { return conns_.size(); }
@@ -188,7 +208,7 @@ class WsServer {
   void deliver_text(int fd, std::uint64_t id, std::string_view text);
 
  private:
-  void on_accept(int fd);
+  void on_accept(int fd, bool aggregator);
   void close_connection(int fd);
 
   EventLoop& loop_;
@@ -196,6 +216,7 @@ class WsServer {
   WsCloseFn on_close_;
   WsOpenFn on_open_;
   std::unique_ptr<TcpListener> listener_;
+  std::unique_ptr<TcpListener> agg_listener_;
   std::unordered_map<int, std::unique_ptr<WsConnection>> conns_;
   std::uint64_t next_conn_id_ = 1;
 };
