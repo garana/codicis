@@ -146,7 +146,10 @@ on the optional internal **aggregator** listener (`net.aggregator_ws_enabled`),
 where a connection whose handshake carries no identity instead supplies a
 per-frame `user` UUID on each message. That lets one connection multiplex many
 end-users (for an internal request aggregator); the trust comes from the port
-being network-restricted, so bind it to a private/loopback address.
+being network-restricted, so bind it to a private/loopback address via
+`net.aggregator_ws_bind_address` (empty reuses `net.bind_address`) and its own
+`net.aggregator_ws_port`. An optional ingress helper (`ingress.helper_cmd`) is
+the intended producer for that listener.
 
 Configuration keys (all under `auth.`; CLI/file share names):
 

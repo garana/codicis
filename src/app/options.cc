@@ -18,6 +18,9 @@ OptionRegistry BuildOptionRegistry() {
                "'user' identity when the handshake is unauthenticated)");
   reg.add_int_range("net.aggregator_ws_port", 8082, 0, 65535,
                     "Port for the aggregator WebSocket listener (0 = ephemeral)");
+  reg.add_string("net.aggregator_ws_bind_address", "",
+                 "IPv4 address for the aggregator WebSocket listener (empty = "
+                 "reuse net.bind_address; keep it private/loopback)");
   reg.add_string("net.bind_address", "127.0.0.1",
                  "IPv4 address to bind listeners to");
   reg.add_int_range("book.mem_levels", 100, 1, 1'000'000,
@@ -33,6 +36,10 @@ OptionRegistry BuildOptionRegistry() {
   reg.add_int_range("storage.processed_queue_max", 10000, 0, 100'000'000,
                     "Max un-committed reports before new orders get 503 "
                     "backpressure (0 disables)");
+  reg.add_string("ingress.helper_cmd", "",
+                 "Command to launch the optional client-request ingress helper "
+                 "(empty = disabled). It connects to the aggregator WebSocket "
+                 "listener and submits per-frame 'user' orders");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
 

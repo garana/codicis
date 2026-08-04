@@ -386,7 +386,15 @@ Status AppServer::start() {
   if (config_.get_bool("net.aggregator_ws_enabled").value()) {
     const auto agg_port_cfg = static_cast<std::uint16_t>(
         config_.get_int("net.aggregator_ws_port").value());
-    if (Status s = ws_->listen_aggregator(addr, agg_port_cfg); !s.ok()) {
+    // A dedicated bind address keeps the aggregator on a private/loopback
+    // interface even when the public listeners bind a wider one; empty reuses
+    // net.bind_address.
+    std::string agg_addr =
+        config_.get_string("net.aggregator_ws_bind_address").value();
+    if (agg_addr.empty()) {
+      agg_addr = addr;
+    }
+    if (Status s = ws_->listen_aggregator(agg_addr, agg_port_cfg); !s.ok()) {
       return s;
     }
   }
