@@ -16,6 +16,11 @@ namespace codicis {
 namespace {
 
 constexpr std::size_t kReadChunk = 16 * 1024;
+/** @brief Per-frame payload cap. */
+constexpr std::size_t kMaxFramePayload = std::size_t{16} * 1024 * 1024;
+/** @brief Cap on a reassembled (fragmented) message, bounding memory a client
+ * can pin by streaming many continuation frames without a FIN. */
+constexpr std::size_t kMaxMessageBytes = std::size_t{64} * 1024 * 1024;
 
 }  // namespace
 
@@ -126,7 +131,8 @@ void WsConnection::process_frames() {
   for (;;) {
     WsFrame frame;
     std::string err;
-    const WsDecode d = DecodeWsFrame(in_, &frame, &err);
+    const WsDecode d = DecodeWsFrame(in_, &frame, &err, kMaxFramePayload,
+                                     /*require_masked=*/true);
     if (d == WsDecode::kIncomplete) {
       return;
     }
@@ -155,6 +161,12 @@ void WsConnection::handle_frame(const WsFrame& frame) {
       return;
     case WsOpcode::kText:
     case WsOpcode::kBinary: {
+      // A new data frame while a fragmented message is in flight is a protocol
+      // violation (RFC 6455 5.4): the continuation must complete first.
+      if (assembling_) {
+        close();
+        return;
+      }
       const bool is_binary = (frame.opcode == WsOpcode::kBinary);
       if (frame.fin) {
         on_message_(*this, is_binary, frame.payload);
@@ -168,6 +180,10 @@ void WsConnection::handle_frame(const WsFrame& frame) {
     case WsOpcode::kContinuation:
       if (!assembling_) {
         close();
+        return;
+      }
+      if (assembly_.size() + frame.payload.size() > kMaxMessageBytes) {
+        close();  // reassembled message would exceed the cap
         return;
       }
       assembly_ += frame.payload;

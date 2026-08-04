@@ -26,7 +26,7 @@ bool IsValidOpcode(std::uint8_t op) {
 }  // namespace
 
 WsDecode DecodeWsFrame(Buffer& in, WsFrame* out, std::string* err,
-                       std::size_t max_payload) {
+                       std::size_t max_payload, bool require_masked) {
   std::string_view v = in.view();
   if (v.size() < 2) {
     return WsDecode::kIncomplete;
@@ -35,6 +35,12 @@ WsDecode DecodeWsFrame(Buffer& in, WsFrame* out, std::string* err,
   const auto b1 = static_cast<std::uint8_t>(v[1]);
 
   const bool fin = (b0 & 0x80) != 0;
+  // RSV1-3 must be zero: codicis negotiates no extensions, so any reserved
+  // bit set is a protocol violation (RFC 6455 5.2).
+  if ((b0 & 0x70) != 0) {
+    *err = "reserved bits set";
+    return WsDecode::kError;
+  }
   const std::uint8_t opcode = b0 & 0x0F;
   const bool masked = (b1 & 0x80) != 0;
   std::uint64_t payload_len = b1 & 0x7F;
@@ -72,6 +78,10 @@ WsDecode DecodeWsFrame(Buffer& in, WsFrame* out, std::string* err,
     header_len += 4;
   }
 
+  if (require_masked && !masked) {
+    *err = "unmasked client frame";
+    return WsDecode::kError;
+  }
   if (!IsValidOpcode(opcode)) {
     *err = "invalid opcode";
     return WsDecode::kError;

@@ -98,6 +98,48 @@ TEST_CASE("Incomplete frame is not consumed", "[ws][frame]") {
   REQUIRE(b.size() == wire.size() - 2);  // nothing consumed
 }
 
+TEST_CASE("Decoder rejects adversarial frames", "[ws][frame][hardening]") {
+  WsFrame f;
+  std::string err;
+
+  SECTION("a reserved (RSV) bit set is a protocol error") {
+    // 0xC1 = FIN + RSV1 + text opcode; unmasked 1-byte payload.
+    const std::uint8_t bytes[] = {0xC1, 0x01, 0x41};
+    Buffer b = MakeBuffer(std::string_view(
+        reinterpret_cast<const char*>(bytes), sizeof(bytes)));
+    REQUIRE(DecodeWsFrame(b, &f, &err) == WsDecode::kError);
+  }
+
+  SECTION("require_masked rejects an unmasked client frame") {
+    const std::string wire = EncodeWsFrame(WsOpcode::kText, "hi");  // unmasked
+    Buffer b = MakeBuffer(wire);
+    REQUIRE(DecodeWsFrame(b, &f, &err, 16 * 1024 * 1024,
+                          /*require_masked=*/true) == WsDecode::kError);
+  }
+
+  SECTION("require_masked still accepts a masked client frame") {
+    const std::string wire = EncodeWsFrame(WsOpcode::kText, "hi", true, kMask);
+    Buffer b = MakeBuffer(wire);
+    REQUIRE(DecodeWsFrame(b, &f, &err, 16 * 1024 * 1024,
+                          /*require_masked=*/true) == WsDecode::kComplete);
+    REQUIRE(f.payload == "hi");
+  }
+
+  SECTION("a fragmented control frame is rejected") {
+    // 0x09 (ping) without FIN -> control frames must not be fragmented.
+    const std::uint8_t bytes[] = {0x09, 0x00};
+    Buffer b = MakeBuffer(std::string_view(
+        reinterpret_cast<const char*>(bytes), sizeof(bytes)));
+    REQUIRE(DecodeWsFrame(b, &f, &err) == WsDecode::kError);
+  }
+
+  SECTION("an oversize payload is rejected against a small cap") {
+    const std::string wire = EncodeWsFrame(WsOpcode::kText, std::string(300, 'x'));
+    Buffer b = MakeBuffer(wire);
+    REQUIRE(DecodeWsFrame(b, &f, &err, /*max_payload=*/64) == WsDecode::kError);
+  }
+}
+
 // ---- Echo server integration ----------------------------------------------
 
 namespace {

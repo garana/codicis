@@ -52,14 +52,17 @@ enum class WsDecode {
 
 /**
  * @brief Decode one frame from @p in.
- * @param in           The receive buffer; consumed on kComplete.
- * @param out          Receives the decoded frame on kComplete.
- * @param err          Receives an error message on kError.
- * @param max_payload  Maximum accepted payload length.
+ * @param in             The receive buffer; consumed on kComplete.
+ * @param out            Receives the decoded frame on kComplete.
+ * @param err            Receives an error message on kError.
+ * @param max_payload    Maximum accepted payload length.
+ * @param require_masked Reject unmasked frames (RFC 6455 5.1: a server MUST
+ *                       fail a connection that sends an unmasked client frame).
  * @return The decode outcome.
  */
 WsDecode DecodeWsFrame(Buffer& in, WsFrame* out, std::string* err,
-                       std::size_t max_payload = 16 * 1024 * 1024);
+                       std::size_t max_payload = 16 * 1024 * 1024,
+                       bool require_masked = false);
 
 /**
  * @brief Encode a frame.
