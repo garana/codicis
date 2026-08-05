@@ -576,7 +576,7 @@ Linux (CI/container) during hardening.
                   test_feed (wire round-trip, replica L1/L2/L3 + gap, publisher
                   pipe write), test_feed_helper (spawn the binary, stream
                   events, a TCP subscriber sees the L1 update + an l2 query).
-                  vx to validate the fan-out under the epoll backend on Linux.
+                  Fan-out validated under the epoll backend on Linux (CI).
             - [x] Slice 4 (displayed-vs-total depth): every book event now
                   carries a `displayed` (lit) quantity beside the matchable
                   `qty` -- 0 for hidden, the slice for an iceberg, else == qty;
@@ -653,7 +653,7 @@ Linux (CI/container) during hardening.
       - [x] Helper-codec hardening: text-record 64 MiB cap (no-terminator
             memory-exhaustion guard) + req_id overflow/length rejection; binary
             codec overrun guards locked in by adversarial test_ipc cases.
-      - [x] Load/soak tests (vx, on the Linux box): in-process event-loop
+      - [x] Load/soak tests (on Linux/epoll): in-process event-loop
             load/soak (test_net_soak -- 100 pipelined connections x 50 requests,
             1000 accept/close waves with zero-leak bookkeeping) and the feed
             fan-out soak (test_feed_soak -- 50 subscribers, sustained stream,
