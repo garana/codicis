@@ -424,6 +424,23 @@ Status AppServer::start() {
     ingress_ = std::move(ir.value());
   }
 
+  // Optional market-data feed helper: codicis spawns it and streams the
+  // book-event feed to its stdin (best-effort, non-blocking). The engine's book
+  // events flow into the FeedPublisher sink, which fans them out to the helper.
+  const std::string feed_cmd = config_.get_string("feed.helper_cmd").value();
+  if (!feed_cmd.empty()) {
+    std::vector<std::string> fargv = Split(feed_cmd, ' ');
+    if (fargv.empty()) {
+      return Status(MakeError(ErrorCode::kInvalidArg, "empty feed.helper_cmd"));
+    }
+    Result<std::unique_ptr<FeedPublisher>> fr = SpawnFeedHelper(loop_, fargv);
+    if (!fr.ok()) {
+      return fr.error();
+    }
+    feed_ = std::move(fr.value());
+    matching_.set_book_event_sink(feed_.get());
+  }
+
   const std::int64_t interval_ms =
       config_.get_int("storage.commit_interval_ms").value();
   commit_timer_ = loop_.add_timer(interval_ms * 1'000'000, /*repeat=*/true,
@@ -839,6 +856,9 @@ void AppServer::handle_metrics(const HttpRequest& /*req*/, HttpResponse& resp) {
        matching_.symbol_count());
   line(o, "codicis_md_subscribers", "gauge",
        "Active market-data WebSocket subscriptions.", md_subs);
+  line(o, "codicis_feed_events_dropped_total", "counter",
+       "Book-events dropped due to a full feed-helper buffer (best-effort).",
+       feed_ ? feed_->dropped() : 0);
 
   resp.set_status(200);
   // Prometheus expects this exact content type for the text format.

@@ -53,6 +53,18 @@ counters, trade prints, and gauges for the storage outbox depth, pending
 placements, live symbols, and market-data subscribers. It carries no identity,
 so restrict it at the edge like `/health` and `/book`.
 
+A market-data **feed helper** (`feed.helper_cmd`) is an optional spawned child.
+The matcher emits a sequence-numbered book-event stream (adds, cancels, trades,
+peg reprices, iceberg replenishes, stop triggers); codicis serializes it to the
+helper's stdin over a compact binary codec, best-effort and non-blocking -- if
+the helper falls behind, events are dropped rather than stalling the matcher and
+the resulting `seq` gap triggers a resync. The reference `codicis_feed_helper`
+runs on the event loop, builds L1 (best bid/ask), L2 (aggregated depth) and L3
+(market-by-order) per symbol from the stream, and fans out to many TCP
+subscribers (newline-delimited JSON: a snapshot on connect, L1 updates as they
+happen, and `l2`/`l3` queries on demand). Slow subscribers are dropped, never
+backpressured onto the hot path. Bind it private.
+
 Every option is also settable via a config file (see
 `config/codicis.example.conf`); CLI flags override file values.
 

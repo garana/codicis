@@ -76,10 +76,12 @@ add_subdirectory(src/ipc)
 add_subdirectory(src/auth)
 add_subdirectory(src/core)
 add_subdirectory(src/engine)
+add_subdirectory(src/feed)
 add_subdirectory(src/app)
 add_subdirectory(tools/storage_helper)
 add_subdirectory(tools/auth_helper)
 add_subdirectory(tools/ingress_helper)
+add_subdirectory(tools/feed_helper)
 
 # ---- Tests -----------------------------------------------------------------
 

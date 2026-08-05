@@ -557,9 +557,32 @@ Linux (CI/container) during hardening.
                   depth/executions still arrive as the inject's own Add/Trade).
                   Tested in test_order_book (a repricing midpoint peg, a
                   replenishing iceberg, a firing stop each emit their event).
-            - [ ] Slice 3+: the feed-helper (consume the stream, build L1/L2/L3,
-                  snapshot+resync on a seq gap) over a pipe -> SPMC ring -> UDP
-                  transport; wire an AppServer sink to drive it.
+            - [x] Slice 3 (feed-helper + publisher, over a pipe): `feed/`
+                  library -- feed_wire (compact binary BookEvent codec),
+                  BookReplica (I/O-free L1/L2/L3 per symbol from the event
+                  stream, with seq-gap detection), and FeedPublisher (codicis-
+                  side BookEventSink: encodes events into a bounded buffer
+                  drained to the helper stdin on the loop; best-effort --
+                  drop-on-overflow, the seq gap signals loss, the matcher never
+                  blocks). Reference `codicis_feed_helper` (tools/) runs on the
+                  generic EventLoop (NO backend-specific code): reads events on
+                  stdin, applies to a BookReplica, and fans out to many TCP
+                  subscribers (JSON: snapshot on connect, L1 updates streamed,
+                  l2/l3 queries). Drop policy: per-subscriber 4 MiB outbound cap
+                  -> disconnect the slow subscriber (never backpressure the hot
+                  path). AppServer spawns it (feed.helper_cmd) and points
+                  matching_.set_book_event_sink at the publisher;
+                  codicis_feed_events_dropped_total on /metrics. Tests:
+                  test_feed (wire round-trip, replica L1/L2/L3 + gap, publisher
+                  pipe write), test_feed_helper (spawn the binary, stream
+                  events, a TCP subscriber sees the L1 update + an l2 query).
+                  vx to validate the fan-out under the epoll backend on Linux.
+            - [ ] Slice 4+: transport beyond the pipe (SPMC shared-memory ring
+                  or UDP multicast); snapshot-based replica RESYNC after a gap
+                  (needs a snapshot source); displayed-vs-total depth (carry a
+                  displayed qty on Add/Reprice). Feed fan-out to Kafka/SNS/SQS
+                  is a separate task (a language-agnostic bridge off the
+                  helper's TCP stream -- see the task list).
 - [~] Authentication + authorization layer:
       - [x] Owner authorization enforced in the engine (owner uuid vs cancel
             requester); order handles are external uuids (see above).

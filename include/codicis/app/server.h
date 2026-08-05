@@ -31,6 +31,7 @@
 #include "codicis/core/order_book.h"
 #include "codicis/engine/trading_engine.h"
 #include "codicis/event/event_loop.h"
+#include "codicis/feed/feed_publisher.h"
 #include "codicis/util/clock.h"
 #include "codicis/ipc/helper_client.h"
 #include "codicis/ipc/helper_codec.h"
@@ -166,6 +167,7 @@ class AppServer : public TimerHandler {
   std::unique_ptr<HttpServer> http_;
   std::unique_ptr<WsServer> ws_;
   std::unique_ptr<IngressHelper> ingress_;  // optional client-request source
+  std::unique_ptr<FeedPublisher> feed_;     // optional market-data feed sink
 
   // Authentication (identity of the requesting user).
   bool auth_header_enabled_ = false;

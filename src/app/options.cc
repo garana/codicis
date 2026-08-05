@@ -41,6 +41,10 @@ OptionRegistry BuildOptionRegistry() {
                  "(empty = disabled). codicis spawns it and reads order/cancel "
                  "requests it initiates over the helper codec (stdout), each "
                  "carrying a per-message 'user'");
+  reg.add_string("feed.helper_cmd", "",
+                 "Command to launch the optional market-data feed helper "
+                 "(empty = disabled). codicis spawns it and streams the "
+                 "book-event feed to its stdin (best-effort, non-blocking)");
   reg.add_string("log.level", "info",
                  "Minimum log level: trace|debug|info|warn|error");
   reg.add_bool("metrics.enabled", true,

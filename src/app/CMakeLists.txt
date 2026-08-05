@@ -9,7 +9,7 @@ target_include_directories(codicis_app PUBLIC
 
 target_link_libraries(codicis_app
   PUBLIC codicis_auth codicis_config codicis_core codicis_engine codicis_event
-         codicis_ipc codicis_net
+         codicis_feed codicis_ipc codicis_net
   PRIVATE codicis_warnings)
 
 add_library(codicis::app ALIAS codicis_app)

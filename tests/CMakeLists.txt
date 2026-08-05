@@ -57,6 +57,17 @@ codicis_add_test(test_matching_engine
   unit/test_matching_engine.cc)
 target_link_libraries(test_matching_engine PRIVATE codicis_core)
 
+codicis_add_test(test_feed
+  unit/test_feed.cc)
+target_link_libraries(test_feed PRIVATE codicis_feed)
+
+codicis_add_test(test_feed_helper
+  unit/test_feed_helper.cc)
+target_link_libraries(test_feed_helper PRIVATE codicis_feed)
+add_dependencies(test_feed_helper codicis_feed_helper)
+target_compile_definitions(test_feed_helper PRIVATE
+  CODICIS_FEED_HELPER_PATH="$<TARGET_FILE:codicis_feed_helper>")
+
 codicis_add_test(test_ipc
   unit/test_ipc.cc)
 target_link_libraries(test_ipc PRIVATE codicis_ipc)
