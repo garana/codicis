@@ -45,6 +45,13 @@ codicis_add_test(test_net_soak
   unit/test_net_soak.cc)
 target_link_libraries(test_net_soak PRIVATE codicis_net)
 
+codicis_add_test(test_feed_soak
+  unit/test_feed_soak.cc)
+target_link_libraries(test_feed_soak PRIVATE codicis_feed)
+add_dependencies(test_feed_soak codicis_feed_helper)
+target_compile_definitions(test_feed_soak PRIVATE
+  CODICIS_FEED_HELPER_PATH="$<TARGET_FILE:codicis_feed_helper>")
+
 codicis_add_test(test_order_book
   unit/test_order_book.cc)
 target_link_libraries(test_order_book PRIVATE codicis_core)
