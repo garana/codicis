@@ -549,10 +549,17 @@ Linux (CI/container) during hardening.
                   downstream feed consumer. Tested in test_matching_engine
                   (Add/Trade/Add across two symbols with contiguous seqs;
                   cancel emits, fill does not). No transport yet.
-            - [ ] Slice 2+: emit Reprice (peg move), Replenish (iceberg), and
-                  Trigger (stop fires) events; then the feed-helper (consume the
-                  stream, build L1/L2/L3, snapshot+resync on gap) over a
-                  pipe -> SPMC ring -> UDP transport. Wire an AppServer sink.
+            - [x] Slice 2 (in-place mutations): kReprice (a pegged order moves
+                  old->new price in move_pegged; BookEvent.prev_price holds the
+                  old), kReplenish (an iceberg refreshes its displayed slice in
+                  the match loop; qty = new slice), kTrigger (a parked stop
+                  fires in evaluate_stops -- a lifecycle marker; the resulting
+                  depth/executions still arrive as the inject's own Add/Trade).
+                  Tested in test_order_book (a repricing midpoint peg, a
+                  replenishing iceberg, a firing stop each emit their event).
+            - [ ] Slice 3+: the feed-helper (consume the stream, build L1/L2/L3,
+                  snapshot+resync on a seq gap) over a pipe -> SPMC ring -> UDP
+                  transport; wire an AppServer sink to drive it.
 - [~] Authentication + authorization layer:
       - [x] Owner authorization enforced in the engine (owner uuid vs cancel
             requester); order handles are external uuids (see above).

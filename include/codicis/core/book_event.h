@@ -12,10 +12,11 @@
  * storage path; a consumer that falls behind detects a @c seq gap and resyncs
  * from a snapshot rather than stalling the matcher.
  *
- * First slice: Add / Cancel / Trade -- the backbone of book depth. Peg reprice,
- * iceberg replenish, and stop-trigger events are later slices (they are book
- * mutations too, but not part of this initial cut). Prints are anonymous
- * (price/qty/side, order ids for internal/drop-copy use only).
+ * Slice 1 was Add / Cancel / Trade -- the backbone of book depth. Slice 2 adds
+ * the three remaining mutation kinds that change an already-resting order in
+ * place: Reprice (a peg moves), Replenish (an iceberg refreshes its slice), and
+ * Trigger (a parked stop fires). Prints are anonymous (price/qty/side, order
+ * ids for internal/drop-copy use only).
  */
 
 #include <cstdint>
@@ -26,10 +27,20 @@ namespace codicis {
 
 /** @brief The kind of book mutation an event reports. */
 enum class BookEventType : std::uint8_t {
-  kAdd,     /**< An order joined the book (rests resident or deep). */
-  kCancel,  /**< A resting order left the book other than by a fill
-                 (explicit cancel, GTD/DAY expiry, STP- or OCO-cancel). */
-  kTrade,   /**< An execution between an aggressor and a resting order. */
+  kAdd,       /**< An order joined the book (rests resident or deep). */
+  kCancel,    /**< A resting order left the book other than by a fill
+                   (explicit cancel, GTD/DAY expiry, STP- or OCO-cancel). */
+  kTrade,     /**< An execution between an aggressor and a resting order. */
+  kReprice,   /**< A resting pegged order moved to a new price (prev_price ->
+                   price), losing time priority: decrement the old level,
+                   add its leaves at the new one. */
+  kReplenish, /**< An iceberg exhausted its displayed slice and refreshed it
+                   from the hidden reserve, re-queued at the back of its level.
+                   qty is the NEW displayed slice at price. */
+  kTrigger,   /**< A parked stop/stop-limit/trailing order fired and was
+                   injected as a market/limit order. A lifecycle marker: the
+                   resulting depth/executions arrive as its own Add/Trade
+                   events. price is the order's limit (0 for stop-market). */
 };
 
 /**
@@ -51,8 +62,12 @@ struct BookEvent {
   OrderId order_id = 0;                     /**< Resting order (maker on trade).*/
   OrderId taker_id = 0;                     /**< Aggressor (kTrade only). */
   Side side = Side::Buy;                    /**< Order side / aggressor side. */
-  Ticks price = 0;                          /**< Price level / execution price. */
-  Quantity qty = 0;                         /**< Leaves (add/cancel) or fill. */
+  Ticks price = 0;                          /**< Price level / execution / new
+                                                 peg price. */
+  Ticks prev_price = 0;                     /**< The old price (kReprice only). */
+  Quantity qty = 0;                         /**< Leaves (add/cancel), fill
+                                                 (trade), or new displayed slice
+                                                 (replenish). */
 };
 
 /**

@@ -5,12 +5,31 @@
 
 #include "catch_amalgamated.hpp"
 
+#include "codicis/core/book_event.h"
 #include "codicis/core/order.h"
 #include "codicis/core/order_book.h"
+
+#include <vector>
 
 using namespace codicis;
 
 namespace {
+
+/** @brief A book-event sink that records every event for assertions. */
+struct RecordingSink : BookEventSink {
+  std::vector<BookEvent> events;
+  void on_book_event(const BookEvent& ev) override { events.push_back(ev); }
+
+  /** @return The first event of a given type, or nullptr if none. */
+  const BookEvent* first(BookEventType type) const {
+    for (const BookEvent& e : events) {
+      if (e.type == type) {
+        return &e;
+      }
+    }
+    return nullptr;
+  }
+};
 
 /** @brief Build a limit order. */
 Order Limit(OrderId id, Side side, Ticks price, Quantity qty,
@@ -989,4 +1008,66 @@ TEST_CASE("An unbounded book (mem_levels 0) never rests deep", "[core][window]")
   }
   REQUIRE(book.resting_count() == 11);
   REQUIRE_FALSE(book.has_deep(Side::Buy));
+}
+
+// ---- Book-event stream, slice 2 (reprice / replenish / trigger) ------------
+
+TEST_CASE("A repricing peg emits a Reprice event", "[core][feed]") {
+  OrderBook book;
+  RecordingSink sink;
+  book.set_symbol("BTC");
+  book.set_event_sink(&sink);
+
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+  book.submit(Peg(3, Side::Buy, PegSpec::Ref::Midpoint, 0, 5));  // rests at 105
+  book.submit(Limit(4, Side::Buy, 104, 5));  // best non-peg bid -> peg to 107
+
+  const BookEvent* rp = sink.first(BookEventType::kReprice);
+  REQUIRE(rp != nullptr);
+  REQUIRE(rp->symbol == "BTC");
+  REQUIRE(rp->order_id == 3);
+  REQUIRE(rp->side == Side::Buy);
+  REQUIRE(rp->prev_price == 105);
+  REQUIRE(rp->price == 107);
+  REQUIRE(rp->qty == 5);
+}
+
+TEST_CASE("A replenishing iceberg emits a Replenish event", "[core][feed]") {
+  OrderBook book;
+  RecordingSink sink;
+  book.set_symbol("BTC");
+  book.set_event_sink(&sink);
+
+  book.submit(Iceberg(1, Side::Buy, 100, 10, 3));  // slice 3, reserve 10
+  book.submit(Limit(2, Side::Sell, 100, 5));       // consumes the 3-slice + more
+
+  const BookEvent* rr = sink.first(BookEventType::kReplenish);
+  REQUIRE(rr != nullptr);
+  REQUIRE(rr->order_id == 1);
+  REQUIRE(rr->side == Side::Buy);
+  REQUIRE(rr->price == 100);
+  REQUIRE(rr->qty == 3);  // the new displayed slice from the reserve
+}
+
+TEST_CASE("A firing stop emits a Trigger event", "[core][feed]") {
+  OrderBook book;
+  RecordingSink sink;
+  book.set_symbol("BTC");
+  book.set_event_sink(&sink);
+
+  // Rest liquidity, then a buy stop that fires when the last trade hits 105.
+  book.submit(Limit(1, Side::Sell, 106, 5));
+  book.submit(StopMarket(2, Side::Buy, /*stop=*/105, 3));
+  book.submit(Limit(3, Side::Sell, 104, 1));   // resting ask
+  book.submit(Limit(4, Side::Buy, 104, 1));    // trade at 104... below 105
+
+  // Drive the last trade price up to 105 to arm the buy stop.
+  book.submit(Limit(5, Side::Sell, 105, 1));
+  book.submit(Limit(6, Side::Buy, 105, 1));    // trade at 105 -> stop 2 fires
+
+  const BookEvent* tg = sink.first(BookEventType::kTrigger);
+  REQUIRE(tg != nullptr);
+  REQUIRE(tg->order_id == 2);
+  REQUIRE(tg->side == Side::Buy);
 }

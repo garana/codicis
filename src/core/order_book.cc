@@ -282,6 +282,23 @@ struct OrderBook::Impl {
     event_sink_->on_book_event(ev);
   }
 
+  /** @brief Emit a Reprice event for a pegged order moving old -> new price. */
+  void emit_reprice(const Order& o, Ticks old_price, Ticks new_price,
+                    Quantity qty) {
+    if (event_sink_ == nullptr) {
+      return;
+    }
+    BookEvent ev;
+    ev.symbol = symbol_;
+    ev.type = BookEventType::kReprice;
+    ev.order_id = o.id;
+    ev.side = o.side;
+    ev.prev_price = old_price;
+    ev.price = new_price;
+    ev.qty = qty;
+    event_sink_->on_book_event(ev);
+  }
+
   /** @brief Wire every pooled container to the shared memory resource. */
   Impl()
       : bids(Side::Buy, &pool_),
@@ -530,6 +547,7 @@ struct OrderBook::Impl {
         me.pos = std::prev(lvl.fifo.end());
         me.slice = std::min(me.order.display_qty, me.order.leaves);
         lvl.displayed += me.slice;
+        emit_event(BookEventType::kReplenish, me.order, me.slice);
         it = next;
         progressed = true;
       } else {
@@ -864,6 +882,9 @@ struct OrderBook::Impl {
         if (o.trigger.has_value()) {
           o.trigger->triggered = true;
         }
+        // Lifecycle marker: the stop fired. Its resulting depth/executions
+        // follow as the inject's own Add/Trade events.
+        emit_event(BookEventType::kTrigger, o, o.leaves);
         inject(o, trades);
       }
     }
@@ -969,6 +990,7 @@ struct OrderBook::Impl {
    */
   void move_pegged(OrderId id, Ticks new_price) {
     Entry& e = orders.at(id);
+    const Ticks old_price = e.order.price;
     Ladder& L = ladder(e.order.side);
     if (Level* lvl = L.at(e.order.price); lvl != nullptr) {
       lvl->total -= e.order.leaves;
@@ -985,6 +1007,7 @@ struct OrderBook::Impl {
     nl.total += e.order.leaves;
     nl.displayed += DisplayedOf(e.order.flags, e.order.leaves, e.slice);
     L.on_added(new_price);
+    emit_reprice(e.order, old_price, new_price, e.order.leaves);
   }
 
   /**
