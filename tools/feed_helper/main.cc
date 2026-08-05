@@ -279,7 +279,11 @@ class FeedHelper {
 };
 
 void StdinReader::on_io_ready(int /*fd*/, IoEvents events) {
-  if (HasEvent(events, IoEvents::kReadable)) {
+  // Treat a hangup like readable: when codicis closes the event pipe with an
+  // empty buffer, epoll reports EPOLLHUP with NO EPOLLIN (kqueue co-delivers
+  // EV_EOF as readable). Draining here still hits the 0-byte read -> EOF.
+  if (HasEvent(events, IoEvents::kReadable) ||
+      HasEvent(events, IoEvents::kHangup)) {
     for (;;) {
       std::uint8_t* dst = in_.reserve(kReadChunk);
       const ssize_t n = ::read(STDIN_FILENO, dst, kReadChunk);
@@ -317,7 +321,10 @@ void StdinReader::on_io_ready(int /*fd*/, IoEvents events) {
 }
 
 void Subscriber::on_io_ready(int /*fd*/, IoEvents events) {
-  if (HasEvent(events, IoEvents::kReadable)) {
+  // Hangup counts as readable so a peer close is drained to the 0-byte read
+  // (drop path) even if epoll delivers EPOLLHUP without EPOLLIN.
+  if (HasEvent(events, IoEvents::kReadable) ||
+      HasEvent(events, IoEvents::kHangup)) {
     on_readable();
     if (dropped_) {
       return;

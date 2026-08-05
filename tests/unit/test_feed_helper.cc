@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -132,8 +133,24 @@ TEST_CASE("Feed-helper fans book events out to a TCP subscriber",
   REQUIRE(stream.find("[105,8]") != std::string::npos);
 
   ::close(c);
-  ::close(child_in);
+  ::close(child_in);  // stdin EOF: the helper should stop its loop and exit
   ::close(child_out);
-  int status = 0;
-  ::waitpid(pid, &status, 0);
+
+  // Bounded wait so a shutdown regression (e.g. an epoll EPOLLHUP-without-EPOLLIN
+  // that never drains the EOF) fails loudly instead of hanging the suite.
+  bool exited = false;
+  for (int i = 0; i < 400; ++i) {  // ~2s
+    int status = 0;
+    if (::waitpid(pid, &status, WNOHANG) == pid) {
+      exited = true;
+      break;
+    }
+    ::usleep(5000);
+  }
+  if (!exited) {
+    ::kill(pid, SIGKILL);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+  }
+  REQUIRE(exited);  // the helper must exit on stdin EOF on its own
 }
