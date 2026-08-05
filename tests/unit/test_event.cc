@@ -187,6 +187,39 @@ TEST_CASE("Real backend reports a readable pipe", "[event][backend]") {
   ::close(fds[1]);
 }
 
+TEST_CASE("Real backend surfaces a pipe EOF as readable", "[event][backend]") {
+  // Contract (event_loop.h): kReadable means "data available OR EOF pending".
+  // When a pipe's writer closes with an empty buffer, the reader is at EOF.
+  // kqueue reports this via EV_EOF on the read filter; epoll reports a pure
+  // EPOLLHUP (no EPOLLIN). Both backends must surface kReadable so a handler
+  // that only watches readability still runs read() and observes the 0-byte
+  // EOF -- otherwise it hangs (this is the class of bug that hung the
+  // feed-helper's stdin reader under epoll).
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  int fds[2];
+  REQUIRE(::pipe(fds) == 0);
+  SetNonBlocking(fds[0]);
+
+  RecordHandler h;
+  REQUIRE(loop.add(fds[0], IoInterest::kRead, &h).ok());
+
+  ::close(fds[1]);  // writer closes: the read end is now at EOF
+
+  REQUIRE(loop.run_once(500).ok());
+  REQUIRE(h.count >= 1);
+  REQUIRE(HasEvent(h.last, IoEvents::kReadable));
+
+  // The readability the backend reported must be a real, drainable EOF.
+  char buf[8];
+  REQUIRE(::read(fds[0], buf, sizeof(buf)) == 0);
+
+  ::close(fds[0]);
+}
+
 TEST_CASE("Real backend enables writability only after modify",
           "[event][backend]") {
   SystemClock clock;

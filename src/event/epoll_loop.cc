@@ -104,8 +104,15 @@ Status EpollLoop::backend_poll(int timeout_ms) {
 
   for (int i = 0; i < n; ++i) {
     const struct epoll_event& ev = events[static_cast<std::size_t>(i)];
+    const bool hangup = (ev.events & (EPOLLHUP | EPOLLRDHUP)) != 0;
     IoEvents out = IoEvents::kNone;
-    if ((ev.events & EPOLLIN) != 0) {
+    // kReadable is documented as "data available OR EOF pending" (event_loop.h).
+    // A pure EPOLLHUP (e.g. a pipe whose writer closed with an empty buffer)
+    // means EOF is pending, but epoll does not co-set EPOLLIN in that case, so
+    // surface it as readable too. This mirrors kqueue, where EV_EOF fires
+    // alongside the read filter; without it a handler that only checks
+    // kReadable would never run read()/observe the EOF and would hang.
+    if ((ev.events & EPOLLIN) != 0 || hangup) {
       out |= IoEvents::kReadable;
     }
     if ((ev.events & EPOLLOUT) != 0) {
@@ -114,7 +121,7 @@ Status EpollLoop::backend_poll(int timeout_ms) {
     if ((ev.events & EPOLLERR) != 0) {
       out |= IoEvents::kError;
     }
-    if ((ev.events & (EPOLLHUP | EPOLLRDHUP)) != 0) {
+    if (hangup) {
       out |= IoEvents::kHangup;
     }
     dispatch_io(ev.data.fd, out);
