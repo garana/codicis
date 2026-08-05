@@ -577,12 +577,28 @@ Linux (CI/container) during hardening.
                   pipe write), test_feed_helper (spawn the binary, stream
                   events, a TCP subscriber sees the L1 update + an l2 query).
                   vx to validate the fan-out under the epoll backend on Linux.
-            - [ ] Slice 4+: transport beyond the pipe (SPMC shared-memory ring
+            - [x] Slice 4 (displayed-vs-total depth): every book event now
+                  carries a `displayed` (lit) quantity beside the matchable
+                  `qty` -- 0 for hidden, the slice for an iceberg, else == qty;
+                  a Trade carries the lit amount its fill consumed; Replenish
+                  re-lights the refreshed slice. Populated at each emit site
+                  from the book's DisplayedOf/slice and carried on the wire.
+                  BookReplica keeps BOTH aggregates per side: matchable
+                  (depth/best_bid/best_ask) and lit (displayed_depth/
+                  best_displayed_bid/best_displayed_ask); a level with only
+                  hidden size is absent from the lit book. Non-breaking: the
+                  matchable accessors are unchanged, the lit view is additive.
+                  The feed-helper's L1 now carries lit_bid/lit_ask beside
+                  bid/ask and answers an `l2d` (lit depth) command; L3
+                  market-by-order stays the full/matchable view. Tested:
+                  test_order_book (Add emits displayed 5/0/3 for normal/hidden/
+                  iceberg) and test_feed (replica separates a hidden better bid
+                  from the lit book; wire round-trips displayed).
+            - [ ] Slice 5+: transport beyond the pipe (SPMC shared-memory ring
                   or UDP multicast); snapshot-based replica RESYNC after a gap
-                  (needs a snapshot source); displayed-vs-total depth (carry a
-                  displayed qty on Add/Reprice). Feed fan-out to Kafka/SNS/SQS
-                  is a separate task (a language-agnostic bridge off the
-                  helper's TCP stream -- see the task list).
+                  (needs a snapshot source). Feed fan-out to Kafka/SNS/SQS is a
+                  separate task (a language-agnostic bridge off the helper's TCP
+                  stream -- see the task list).
 - [~] Authentication + authorization layer:
       - [x] Owner authorization enforced in the engine (owner uuid vs cancel
             requester); order handles are external uuids (see above).
@@ -614,7 +630,7 @@ Linux (CI/container) during hardening.
             other per-user ingress mechanism.
       - [ ] JWT/PASETO verification at the edge, mTLS, or HMAC request signing
             as alternative/stronger authentication front-ends (see To Design).
-- [~] H2 Hardening (robustness):
+- [x] H2 Hardening (robustness):
       - [x] Linux/epoll compile + validation: built clean under -Werror in an
             ubuntu:24.04 clean-room; 7 real-EpollLoop integration tests
             (test_net_epoll) exercise partial reads, EAGAIN/EPOLLOUT
@@ -637,9 +653,13 @@ Linux (CI/container) during hardening.
       - [x] Helper-codec hardening: text-record 64 MiB cap (no-terminator
             memory-exhaustion guard) + req_id overflow/length rejection; binary
             codec overrun guards locked in by adversarial test_ipc cases.
-      - [ ] Load/soak tests (proposed for the Linux box). (H1 in-process TLS is
-            dropped entirely -- TLS is offloaded to an edge proxy; see To
-            Design.)
+      - [x] Load/soak tests (vx, on the Linux box): in-process event-loop
+            load/soak (test_net_soak -- 100 pipelined connections x 50 requests,
+            1000 accept/close waves with zero-leak bookkeeping) and the feed
+            fan-out soak (test_feed_soak -- 50 subscribers, sustained stream,
+            slow-consumer 4 MiB drop, abrupt-close survival). Green in the
+            ubuntu:24.04 clean-room. (H1 in-process TLS is dropped entirely --
+            TLS is offloaded to an edge proxy; see To Design.)
 - [x] Observability: a Prometheus text metrics endpoint (`metrics.enabled`,
       `metrics.path` default `/metrics`). AppServer keeps single-threaded
       process counters (orders received/accepted/rejected/backpressure, cancels

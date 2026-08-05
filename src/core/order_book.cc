@@ -251,8 +251,13 @@ struct OrderBook::Impl {
   Symbol symbol_;                       // tags emitted book events
   BookEventSink* event_sink_ = nullptr; // nullptr disables emission
 
-  /** @brief Emit an Add/Cancel event for order @p o carrying @p qty leaves. */
-  void emit_event(BookEventType type, const Order& o, Quantity qty) {
+  /**
+   * @brief Emit an Add/Cancel/Replenish/Trigger event for order @p o.
+   * @param qty       The matchable quantity (leaves, or the new slice).
+   * @param displayed The lit portion (0 hidden, slice iceberg, else == qty).
+   */
+  void emit_event(BookEventType type, const Order& o, Quantity qty,
+                  Quantity displayed) {
     if (event_sink_ == nullptr) {
       return;
     }
@@ -263,11 +268,16 @@ struct OrderBook::Impl {
     ev.side = o.side;
     ev.price = o.price;
     ev.qty = qty;
+    ev.displayed = displayed;
     event_sink_->on_book_event(ev);
   }
 
-  /** @brief Emit a Trade event for execution @p t. */
-  void emit_trade(const Trade& t) {
+  /**
+   * @brief Emit a Trade event for execution @p t.
+   * @param displayed The lit quantity the fill consumed (0 if the maker is
+   *                  hidden, else the fill).
+   */
+  void emit_trade(const Trade& t, Quantity displayed) {
     if (event_sink_ == nullptr) {
       return;
     }
@@ -279,12 +289,13 @@ struct OrderBook::Impl {
     ev.side = t.taker_side;
     ev.price = t.price;
     ev.qty = t.qty;
+    ev.displayed = displayed;
     event_sink_->on_book_event(ev);
   }
 
   /** @brief Emit a Reprice event for a pegged order moving old -> new price. */
   void emit_reprice(const Order& o, Ticks old_price, Ticks new_price,
-                    Quantity qty) {
+                    Quantity qty, Quantity displayed) {
     if (event_sink_ == nullptr) {
       return;
     }
@@ -296,6 +307,7 @@ struct OrderBook::Impl {
     ev.prev_price = old_price;
     ev.price = new_price;
     ev.qty = qty;
+    ev.displayed = displayed;
     event_sink_->on_book_event(ev);
   }
 
@@ -480,7 +492,8 @@ struct OrderBook::Impl {
               DisplayedOf(me.order.flags, me.order.leaves, me.slice);
           release_reserved(me.order, me.order.leaves);
           // The resting maker leaves the book without a fill (STP cancel).
-          emit_event(BookEventType::kCancel, me.order, me.order.leaves);
+          emit_event(BookEventType::kCancel, me.order, me.order.leaves,
+                     DisplayedOf(me.order.flags, me.order.leaves, me.slice));
           it = lvl.fifo.erase(it);
           orders.erase(mid);
           pegged.erase(mid);
@@ -513,7 +526,9 @@ struct OrderBook::Impl {
                              .taker_side = o.side,
                              .price = p,
                              .qty = fill});
-      emit_trade(trades.back());
+      // A hidden maker shows nothing, so its fills consume 0 lit quantity;
+      // otherwise the fill reduces the displayed depth by the same amount.
+      emit_trade(trades.back(), hidden ? 0 : fill);
       last_price = p;  // stop-trigger reference
       have_last = true;
       o.leaves -= fill;
@@ -547,7 +562,8 @@ struct OrderBook::Impl {
         me.pos = std::prev(lvl.fifo.end());
         me.slice = std::min(me.order.display_qty, me.order.leaves);
         lvl.displayed += me.slice;
-        emit_event(BookEventType::kReplenish, me.order, me.slice);
+        // The refreshed slice becomes lit again (total is unchanged).
+        emit_event(BookEventType::kReplenish, me.order, me.slice, me.slice);
         it = next;
         progressed = true;
       } else {
@@ -726,7 +742,11 @@ struct OrderBook::Impl {
         if (worst_price(own, &worst) && populated_count(own) >= mem_levels &&
             worse_than(o.side, o.price, worst)) {
           note_deep(o.side, o.price);  // beyond the window -> rests deep
-          emit_event(BookEventType::kAdd, o, o.leaves);  // joins the book (deep)
+          const Quantity dslice = HasFlag(o.flags, OrderFlag::kIceberg)
+                                      ? std::min(o.display_qty, o.leaves)
+                                      : 0;
+          emit_event(BookEventType::kAdd, o, o.leaves,  // joins the book (deep)
+                     DisplayedOf(o.flags, o.leaves, dslice));
           return false;
         }
       }
@@ -752,7 +772,8 @@ struct OrderBook::Impl {
     if (mem_levels > 0 && new_level && populated_count(own) > mem_levels) {
       evict_worst(own, evicted);
     }
-    emit_event(BookEventType::kAdd, o, o.leaves);  // joins the book (resident)
+    emit_event(BookEventType::kAdd, o, o.leaves,  // joins the book (resident)
+               DisplayedOf(o.flags, o.leaves, slice));
     return true;
   }
 
@@ -884,7 +905,8 @@ struct OrderBook::Impl {
         }
         // Lifecycle marker: the stop fired. Its resulting depth/executions
         // follow as the inject's own Add/Trade events.
-        emit_event(BookEventType::kTrigger, o, o.leaves);
+        // A trigger is a lifecycle marker, not depth; displayed is irrelevant.
+        emit_event(BookEventType::kTrigger, o, o.leaves, 0);
         inject(o, trades);
       }
     }
@@ -1007,7 +1029,8 @@ struct OrderBook::Impl {
     nl.total += e.order.leaves;
     nl.displayed += DisplayedOf(e.order.flags, e.order.leaves, e.slice);
     L.on_added(new_price);
-    emit_reprice(e.order, old_price, new_price, e.order.leaves);
+    emit_reprice(e.order, old_price, new_price, e.order.leaves,
+                 DisplayedOf(e.order.flags, e.order.leaves, e.slice));
   }
 
   /**
@@ -1170,7 +1193,8 @@ struct OrderBook::Impl {
                                .taker_side = Side::Buy,
                                .price = pstar,
                                .qty = q});
-        emit_trade(trades.back());
+        emit_trade(trades.back(),
+                   HasFlag(s->flags, OrderFlag::kHidden) ? 0 : q);
         b->leaves -= q;
         b->filled += q;
         s->leaves -= q;
@@ -1530,7 +1554,7 @@ bool OrderBook::cancel(OrderId id) {
   const Quantity displayed = DisplayedOf(e.order.flags, leaves, e.slice);
   // The order leaves the book other than by a fill (explicit cancel, GTD/DAY
   // expiry via expire(), or an OCO sibling cancel routed through here).
-  impl_->emit_event(BookEventType::kCancel, e.order, leaves);
+  impl_->emit_event(BookEventType::kCancel, e.order, leaves, displayed);
   impl_->release_reserved(e.order, leaves);  // a resting reduce-only order
   Ladder& own = impl_->ladder(side);
   if (Level* lvl = own.at(price); lvl != nullptr) {

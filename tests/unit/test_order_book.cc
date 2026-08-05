@@ -1050,6 +1050,26 @@ TEST_CASE("A replenishing iceberg emits a Replenish event", "[core][feed]") {
   REQUIRE(rr->qty == 3);  // the new displayed slice from the reserve
 }
 
+TEST_CASE("Add events carry the displayed (lit) quantity", "[core][feed]") {
+  OrderBook book;
+  RecordingSink sink;
+  book.set_symbol("BTC");
+  book.set_event_sink(&sink);
+
+  book.submit(Limit(1, Side::Buy, 100, 5));            // normal: displayed == 5
+  book.submit(HiddenLimit(2, Side::Buy, 99, 8));       // hidden: displayed == 0
+  book.submit(Iceberg(3, Side::Buy, 98, 10, 3));       // iceberg: displayed == 3
+
+  REQUIRE(sink.events.size() == 3);
+  REQUIRE(sink.events[0].type == BookEventType::kAdd);
+  REQUIRE(sink.events[0].qty == 5);
+  REQUIRE(sink.events[0].displayed == 5);
+  REQUIRE(sink.events[1].qty == 8);
+  REQUIRE(sink.events[1].displayed == 0);   // hidden shows nothing
+  REQUIRE(sink.events[2].qty == 10);
+  REQUIRE(sink.events[2].displayed == 3);   // iceberg shows its slice
+}
+
 TEST_CASE("A firing stop emits a Trigger event", "[core][feed]") {
   OrderBook book;
   RecordingSink sink;

@@ -42,6 +42,7 @@ void EncodeBookEvent(const BookEvent& ev, std::string* out) {
   PutUint(out, static_cast<std::uint64_t>(ev.price), 8);
   PutUint(out, static_cast<std::uint64_t>(ev.prev_price), 8);
   PutUint(out, static_cast<std::uint64_t>(ev.qty), 8);
+  PutUint(out, static_cast<std::uint64_t>(ev.displayed), 8);
   out->append(ev.symbol);
 }
 
@@ -70,6 +71,7 @@ FeedDecode DecodeBookEvent(Buffer& in, BookEvent* out) {
   out->price = static_cast<Ticks>(GetUint(base + 28, 8));
   out->prev_price = static_cast<Ticks>(GetUint(base + 36, 8));
   out->qty = static_cast<Quantity>(GetUint(base + 44, 8));
+  out->displayed = static_cast<Quantity>(GetUint(base + 52, 8));
   out->symbol.assign(reinterpret_cast<const char*>(base + kFeedRecordFixed),
                      symbol_len);
   in.consume(total);

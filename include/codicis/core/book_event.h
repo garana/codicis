@@ -67,7 +67,13 @@ struct BookEvent {
   Ticks prev_price = 0;                     /**< The old price (kReprice only). */
   Quantity qty = 0;                         /**< Leaves (add/cancel), fill
                                                  (trade), or new displayed slice
-                                                 (replenish). */
+                                                 (replenish) -- the MATCHABLE
+                                                 quantity. */
+  Quantity displayed = 0;                   /**< The DISPLAYED (lit) portion: 0
+                                                 for hidden, the slice for an
+                                                 iceberg, else == qty. On a trade
+                                                 it is the displayed amount the
+                                                 fill consumed. Drives L1/L2. */
 };
 
 /**

@@ -21,6 +21,7 @@
  *   i64 price
  *   i64 prev_price
  *   i64 qty
+ *   i64 displayed
  *   u8[symbol_len] symbol
  */
 
@@ -34,7 +35,7 @@
 namespace codicis {
 
 /** @brief Fixed-size prefix of a wire record (before the symbol bytes). */
-constexpr std::size_t kFeedRecordFixed = 1 + 1 + 2 + 8 + 8 + 8 + 8 + 8 + 8;
+constexpr std::size_t kFeedRecordFixed = 1 + 1 + 2 + 8 + 8 + 8 + 8 + 8 + 8 + 8;
 
 /** @brief Outcome of @ref DecodeBookEvent. */
 enum class FeedDecode {

@@ -1,28 +1,30 @@
 /**
  * @file main.cc
- * @brief Reference market-data feed-helper: book-event stream -> L1/L2/L3 fan-out.
+ * @brief Reference market-data feed-helper: book-event stream -> L1/L2/L3.
  *
  * A spawned child that is the SINK of codicis's book-event stream. It reads
- * @ref codicis::BookEvent records from stdin (the feed wire codec), applies them
- * to a @ref codicis::BookReplica to maintain L1/L2/L3 per symbol, and fans the
- * result out to many TCP subscribers over the generic @ref codicis::EventLoop
- * (kqueue or epoll -- no backend-specific code here).
+ * @ref codicis::BookEvent records from stdin (the feed wire codec), applies
+ * them to a @ref codicis::BookReplica to maintain L1/L2/L3 per symbol, and fans
+ * the result out to many TCP subscribers over the generic @ref
+ * codicis::EventLoop (kqueue or epoll -- no backend-specific code here).
  *
  * Subscriber protocol (newline-delimited JSON, plaintext -- restrict at the
  * edge / bind private):
  *   - On connect: one {"t":"l1",...} snapshot line per symbol, then
  *     {"t":"ready"}.
  *   - On every applied event: the affected symbol's updated {"t":"l1",...}.
+ *     L1 carries both matchable (bid/ask) and displayed/lit (lit_bid/lit_ask).
  *   - A subscriber may send commands (newline-terminated):
- *       l2 <sym>              -> {"t":"l2","sym":..,"bids":[[px,qty]..],"asks":..}
- *       l3 <sym> <b|s> <px>   -> {"t":"l3",...,"orders":[[id,qty]..]}
+ *       l2  <sym>             -> matchable depth {"t":"l2",...}
+ *       l2d <sym>             -> displayed (lit) depth {"t":"l2d",...}
+ *       l3  <sym> <b|s> <px>  -> market-by-order {"t":"l3",...}
  *
- * Drop policy: each subscriber has a bounded outbound buffer. If an update would
- * overflow it, that subscriber is DISCONNECTED (drop-subscriber, not
- * drop-oldest, not backpressure) so the stdin->replica->broadcast hot path never
- * stalls; a dropped subscriber reconnects and re-snapshots. Gaps in the upstream
- * seq (best-effort feed) are counted and logged; snapshot-based resync of the
- * replica itself is a follow-on.
+ * Drop policy: each subscriber has a bounded outbound buffer. If an update
+ * would overflow it, that subscriber is DISCONNECTED (drop-subscriber, not
+ * drop-oldest, not backpressure) so the stdin->replica->broadcast hot path
+ * never stalls; a dropped subscriber reconnects and re-snapshots. Gaps in the
+ * upstream seq (best-effort feed) are counted and logged; snapshot resync of
+ * the replica itself is a follow-on.
  *
  * Listen address: argv "<host> <port>" or $CODICIS_FEED_LISTEN ("host:port");
  * default 127.0.0.1:0 (ephemeral). The bound port is printed to stdout as
@@ -57,7 +59,8 @@ constexpr std::size_t kReadChunk = std::size_t{64} * 1024;
 /** @brief Per-subscriber outbound cap; overflow disconnects the subscriber. */
 constexpr std::size_t kSubscriberOutCap = std::size_t{4} * 1024 * 1024;
 
-/** @brief Render an L1 snapshot line for one symbol. */
+/** @brief Render an L1 snapshot line for one symbol: matchable best bid/ask
+ *  plus the displayed (lit) best bid/ask. */
 std::string L1Json(const BookReplica& r, const Symbol& sym) {
   Ticks bpx = 0;
   Quantity bqty = 0;
@@ -65,6 +68,12 @@ std::string L1Json(const BookReplica& r, const Symbol& sym) {
   Quantity aqty = 0;
   const bool have_bid = r.best_bid(sym, &bpx, &bqty);
   const bool have_ask = r.best_ask(sym, &apx, &aqty);
+  Ticks lbpx = 0;
+  Quantity lbqty = 0;
+  Ticks lapx = 0;
+  Quantity laqty = 0;
+  const bool have_lbid = r.best_displayed_bid(sym, &lbpx, &lbqty);
+  const bool have_lask = r.best_displayed_ask(sym, &lapx, &laqty);
   std::string s = "{\"t\":\"l1\",\"sym\":\"";
   s += sym;
   s += "\",\"seq\":";
@@ -77,12 +86,22 @@ std::string L1Json(const BookReplica& r, const Symbol& sym) {
   s += have_ask ? std::to_string(apx) : "null";
   s += ",\"ask_qty\":";
   s += std::to_string(have_ask ? aqty : 0);
+  s += ",\"lit_bid\":";
+  s += have_lbid ? std::to_string(lbpx) : "null";
+  s += ",\"lit_bid_qty\":";
+  s += std::to_string(have_lbid ? lbqty : 0);
+  s += ",\"lit_ask\":";
+  s += have_lask ? std::to_string(lapx) : "null";
+  s += ",\"lit_ask_qty\":";
+  s += std::to_string(have_lask ? laqty : 0);
   s += "}\n";
   return s;
 }
 
-/** @brief Render an L2 depth snapshot line (top 10 levels/side). */
-std::string L2Json(const BookReplica& r, const Symbol& sym) {
+/** @brief Render an L2 depth snapshot line (top 10 levels/side). With
+ *  @p displayed the lit book is reported (tag "l2d"), else the matchable book
+ *  (tag "l2"). */
+std::string L2Json(const BookReplica& r, const Symbol& sym, bool displayed) {
   const auto emit = [](const std::vector<BookReplica::Level>& lv) {
     std::string s = "[";
     for (std::size_t i = 0; i < lv.size(); ++i) {
@@ -95,12 +114,17 @@ std::string L2Json(const BookReplica& r, const Symbol& sym) {
     s += "]";
     return s;
   };
-  std::string s = "{\"t\":\"l2\",\"sym\":\"";
+  const auto bids = displayed ? r.displayed_depth(sym, Side::Buy, 10)
+                              : r.depth(sym, Side::Buy, 10);
+  const auto asks = displayed ? r.displayed_depth(sym, Side::Sell, 10)
+                              : r.depth(sym, Side::Sell, 10);
+  std::string s = displayed ? "{\"t\":\"l2d\",\"sym\":\""
+                            : "{\"t\":\"l2\",\"sym\":\"";
   s += sym;
   s += "\",\"bids\":";
-  s += emit(r.depth(sym, Side::Buy, 10));
+  s += emit(bids);
   s += ",\"asks\":";
-  s += emit(r.depth(sym, Side::Sell, 10));
+  s += emit(asks);
   s += "}\n";
   return s;
 }
@@ -442,7 +466,9 @@ void Subscriber::handle_command(const std::string& line) {
   if (tok[0] == "l1" && tok.size() >= 2) {
     queue(L1Json(r, tok[1]));
   } else if (tok[0] == "l2" && tok.size() >= 2) {
-    queue(L2Json(r, tok[1]));
+    queue(L2Json(r, tok[1], /*displayed=*/false));
+  } else if (tok[0] == "l2d" && tok.size() >= 2) {
+    queue(L2Json(r, tok[1], /*displayed=*/true));
   } else if (tok[0] == "l3" && tok.size() >= 4) {
     const Side side = tok[2] == "s" ? Side::Sell : Side::Buy;
     const Ticks px = static_cast<Ticks>(std::atoll(tok[3].c_str()));

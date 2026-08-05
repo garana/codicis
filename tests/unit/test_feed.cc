@@ -41,6 +41,7 @@ TEST_CASE("Feed wire round-trips a book event", "[feed][wire]") {
   BookEvent in = Add(7, "BTC", 42, Side::Sell, 12345, 99);
   in.taker_id = 5;
   in.prev_price = 12000;
+  in.displayed = 40;
 
   std::string bytes;
   EncodeBookEvent(in, &bytes);
@@ -59,6 +60,7 @@ TEST_CASE("Feed wire round-trips a book event", "[feed][wire]") {
   REQUIRE(out.price == 12345);
   REQUIRE(out.prev_price == 12000);
   REQUIRE(out.qty == 99);
+  REQUIRE(out.displayed == 40);
 }
 
 TEST_CASE("Feed wire is incremental and pipelined", "[feed][wire]") {
@@ -174,6 +176,49 @@ TEST_CASE("Replica applies cancel, trade and reprice", "[feed][replica]") {
     REQUIRE(asks[1].price == 107);
     REQUIRE(asks[1].qty == 4);
   }
+}
+
+TEST_CASE("Replica separates matchable from displayed depth",
+          "[feed][replica]") {
+  BookReplica r;
+  // A normal bid: displayed == matchable.
+  BookEvent normal = Add(1, "BTC", 1, Side::Buy, 100, 5);
+  normal.displayed = 5;
+  r.apply(normal);
+  // A hidden bid at a BETTER price: matchable-only, contributes 0 lit.
+  BookEvent hidden = Add(2, "BTC", 2, Side::Buy, 101, 8);
+  hidden.displayed = 0;
+  r.apply(hidden);
+  // An iceberg bid at 100: 10 matchable, only a 3-slice lit.
+  BookEvent ice = Add(3, "BTC", 3, Side::Buy, 100, 10);
+  ice.displayed = 3;
+  r.apply(ice);
+
+  Ticks px = 0;
+  Quantity qty = 0;
+  // Matchable L1: the hidden order at 101 is the best matchable bid.
+  REQUIRE(r.best_bid("BTC", &px, &qty));
+  REQUIRE(px == 101);
+  REQUIRE(qty == 8);
+  // Displayed L1: the hidden order is invisible, so the lit best bid is 100
+  // (normal 5 + iceberg slice 3 = 8 lit).
+  REQUIRE(r.best_displayed_bid("BTC", &px, &qty));
+  REQUIRE(px == 100);
+  REQUIRE(qty == 8);
+
+  // Matchable L2 shows 101 (8) then 100 (15 = 5 + 10). Displayed L2 omits 101
+  // entirely and shows 100 with 8 lit.
+  const auto full = r.depth("BTC", Side::Buy, 0);
+  REQUIRE(full.size() == 2);
+  REQUIRE(full[0].price == 101);
+  REQUIRE(full[0].qty == 8);
+  REQUIRE(full[1].price == 100);
+  REQUIRE(full[1].qty == 15);
+
+  const auto lit = r.displayed_depth("BTC", Side::Buy, 0);
+  REQUIRE(lit.size() == 1);  // 101 is hidden-only -> absent from the lit book
+  REQUIRE(lit[0].price == 100);
+  REQUIRE(lit[0].qty == 8);
 }
 
 TEST_CASE("Replica detects a sequence gap", "[feed][replica]") {

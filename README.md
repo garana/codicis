@@ -62,8 +62,12 @@ the resulting `seq` gap triggers a resync. The reference `codicis_feed_helper`
 runs on the event loop, builds L1 (best bid/ask), L2 (aggregated depth) and L3
 (market-by-order) per symbol from the stream, and fans out to many TCP
 subscribers (newline-delimited JSON: a snapshot on connect, L1 updates as they
-happen, and `l2`/`l3` queries on demand). Slow subscribers are dropped, never
-backpressured onto the hot path. Bind it private.
+happen, and `l2`/`l2d`/`l3` queries on demand). Each event carries both the
+matchable quantity and the displayed (lit) quantity, so the helper serves two
+views: the matchable book (`l2`, hidden orders and full iceberg reserves
+included) and the lit book (`l2d` and the `lit_bid`/`lit_ask` L1 fields, where
+hidden shows nothing and an iceberg shows only its slice). Slow subscribers are
+dropped, never backpressured onto the hot path. Bind it private.
 
 Every option is also settable via a config file (see
 `config/codicis.example.conf`); CLI flags override file values.
