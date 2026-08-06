@@ -105,7 +105,39 @@ Without the env var set, the test skips.
 
 ## Feed helpers
 
-The market-data fan-out bridges (Kafka, SNS, SQS, AMQP/RabbitMQ, NATS, Redis,
-MQTT, ZeroMQ) subscribe to the codicis feed-helper's stream and republish it to
-their broker. They are added incrementally alongside their broker services in
-`docker/`.
+The market-data fan-out bridges subscribe to the codicis feed-helper's TCP
+stream (newline JSON: an L1 snapshot on connect, then L1 updates and any
+l2/l2d/l3 query replies) and republish each per-symbol message to a broker. The
+shared `internal/feed` runtime does the connect / read / reconnect loop once
+(the feed is best-effort: on a dropped connection the bridge reconnects and the
+helper re-snapshots); each bridge binary supplies only a `Sink`.
+
+| Broker | Binary       | Client            | Destination                    |
+| ------ | ------------ | ----------------- | ------------------------------ |
+| Redis  | `feed-redis` | redis/go-redis    | PUBLISH channel `<prefix><sym>`|
+| NATS   | `feed-nats`  | nats-io/nats.go   | subject `<prefix><sym>`        |
+
+More brokers (Kafka, AMQP/RabbitMQ, MQTT, ZeroMQ, AWS SNS/SQS) follow the same
+`Sink` shape and are added alongside their `docker/` services.
+
+Run a bridge against a running feed-helper:
+
+```
+feed-redis -feed 127.0.0.1:9100 -redis localhost:6379 -prefix md.
+```
+
+Integration tests (gated on the broker env var) stand up a fake feed source and
+assert the bridge republishes to the real broker:
+
+```
+docker compose -f docker/docker-compose.yml up -d redis nats
+CODICIS_REDIS_ADDR=localhost:6379 go test -tags integration ./cmd/feed-redis/
+CODICIS_NATS_URL=nats://localhost:4222 go test -tags integration ./cmd/feed-nats/
+```
+
+## Third-party licenses
+
+Every vendored dependency is permissively licensed (MIT, Apache-2.0, BSD-3, and
+MPL-2.0 for the MySQL driver) -- none are GPL/LGPL, so vendoring and
+redistribution are compatible with codicis's own license. Each dependency's
+license text is retained under `vendor/`.

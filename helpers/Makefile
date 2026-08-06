@@ -8,14 +8,16 @@ export GOTOOLCHAIN := local
 
 # Each backend is its own binary linking only its own driver.
 STORAGE := storage-postgres storage-mysql storage-mongo
+FEED    := feed-redis feed-nats
+HELPERS := $(STORAGE) $(FEED)
 
-.PHONY: all build test vendor tidy clean $(addprefix build-,$(STORAGE))
+.PHONY: all build test vendor tidy clean
 
 all: build
 
 build: ## build every helper into ./bin
 	@mkdir -p bin
-	@for c in $(STORAGE); do \
+	@for c in $(HELPERS); do \
 	  echo "build $$c"; \
 	  go build -o bin/$$c ./cmd/$$c/ || exit 1; \
 	done

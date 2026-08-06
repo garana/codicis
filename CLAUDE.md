@@ -701,8 +701,13 @@ Linux (CI/container) during hardening.
             with no services; `-tags integration` tests drive each Store through
             a full lifecycle against real Postgres/MySQL/Mongo in
             docker-compose (`docker/`) -- all three green.
-      - [ ] Feed fan-out bridges (Kafka/SNS/SQS/AMQP/RabbitMQ/NATS/Redis/MQTT/
-            ZeroMQ): subscribe to the feed-helper stream and republish per
-            broker; all pure-Go clients (no CGO). Next.
+      - [~] Feed fan-out bridges: subscribe to the feed-helper's TCP JSON
+            stream and republish per-symbol to a broker. Shared `internal/feed`
+            does the connect/read/reconnect loop once (best-effort: reconnect +
+            re-snapshot on drop); each bridge supplies a Sink. All pure-Go
+            clients (no CGO). DONE: feed-redis (PUBLISH channel) and feed-nats
+            (subject), both with integration tests (fake feed source -> bridge
+            -> real broker -> subscriber) green in docker-compose. TODO:
+            Kafka, AMQP/RabbitMQ, MQTT, ZeroMQ, AWS SNS/SQS (same Sink shape).
       NB the Go helpers are OUTSIDE the C++ CMake build; the C++ reference
       helpers (tools/) remain the in-tree contract tests.
