@@ -107,3 +107,16 @@ target_compile_definitions(test_app PRIVATE
   CODICIS_STORAGE_HELPER_PATH="$<TARGET_FILE:codicis_storage_helper>"
   CODICIS_AUTH_HELPER_PATH="$<TARGET_FILE:codicis_auth_helper>"
   CODICIS_INGRESS_HELPER_PATH="$<TARGET_FILE:codicis_ingress_helper>")
+
+# Black-box smoke + golden-snapshot test: launches the real codicis binary with
+# a recording-shim storage helper and diffs the emitted wire traffic against a
+# committed golden. Shell-driven (curl + the shipped binary), registered
+# directly with ctest rather than as a Catch2 target.
+if(CODICIS_BUILD_TESTS)
+  add_test(NAME blackbox_smoke
+    COMMAND ${CMAKE_COMMAND} -E env
+      CODICIS_BIN=$<TARGET_FILE:codicis>
+      CODICIS_STORAGE_HELPER=$<TARGET_FILE:codicis_storage_helper>
+      BLACKBOX_DIR=${CMAKE_CURRENT_SOURCE_DIR}/blackbox
+      sh ${CMAKE_CURRENT_SOURCE_DIR}/blackbox/smoke.sh)
+endif()

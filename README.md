@@ -119,6 +119,21 @@ Options:
 
 For Claude Code users, the `build` and `test` skills wrap these commands.
 
+## Testing
+
+The C++ unit and integration suite runs under `ctest` (see Building above). It
+covers the matching engine plus the app-level REST, WebSocket, authentication,
+and market-data flows exercised against the server over real loopback sockets.
+
+The Go data helpers under `helpers/` have their own integration tests against
+real backing services (PostgreSQL, MySQL, MongoDB, Redis, NATS, Kafka, RabbitMQ,
+MQTT, and LocalStack for SNS/SQS). They require a running Docker daemon; run
+them with:
+
+```
+make -C helpers integration
+```
+
 ## Configuration
 
 Configuration comes from a config file and/or CLI flags; CLI flags take
