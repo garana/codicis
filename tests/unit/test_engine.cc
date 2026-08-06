@@ -302,6 +302,61 @@ TEST_CASE("A repriced peg is re-reported to storage with a new rank",
   ::close(sp[1]);
 }
 
+TEST_CASE("Boot seeds id/rank counters above the storage watermarks",
+          "[engine][seed]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  StorageClient storage(client);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
+  TestHelper helper{sp[1], codec, {}};
+
+  // Seed from storage; the helper reports max id 100 and max rank 500.
+  bool seeded = false;
+  engine.seed_from_storage([&seeded]() { seeded = true; });
+  for (int i = 0; i < 80 && !seeded; ++i) {
+    for (const HelperMessage& m : helper.read_requests()) {
+      if (m.type == "pull_watermarks") {
+        HelperMessage resp;
+        resp.req_id = m.req_id;
+        resp.type = "pull_watermarks";
+        resp.set("max_id", "100");
+        resp.set("max_rank", "500");
+        helper.write_msg(resp);
+      }
+    }
+    loop.run_once(2);
+  }
+  REQUIRE(seeded);
+
+  // A new resting order must get an id above 100 and a rank above 500, so it
+  // cannot collide with, or outrank, anything restored from storage.
+  engine.submit("BTC", "", Limit(Side::Buy, 100, 5), nullptr);
+  std::string rest_id, rest_seq;
+  for (int i = 0; i < 40 && rest_id.empty(); ++i) {
+    for (const HelperMessage& m : helper.read_requests()) {
+      if (m.type == "report_order") {
+        helper.ack(m.req_id, "report_order");
+      } else if (m.type == "report_rest") {
+        rest_id = *m.get("id");
+        rest_seq = *m.get("seq");
+      }
+    }
+    loop.run_once(2);
+  }
+  REQUIRE(rest_id == "101");                 // max_id + 1
+  REQUIRE(std::stoull(rest_seq) >= 501);     // above max_rank
+
+  ::close(sp[1]);
+}
+
 TEST_CASE("A failed pre-report does not place the order", "[engine]") {
   SystemClock clock;
   Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);

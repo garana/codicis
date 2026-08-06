@@ -188,6 +188,39 @@ void StorageClient::pull_levels(const std::string& symbol,
                });
 }
 
+namespace {
+
+/** @brief Parse an unsigned decimal from a helper field (0 if absent/bad). */
+std::uint64_t ParseU64(const HelperMessage& m, const char* key) {
+  std::uint64_t v = 0;
+  if (const std::string* s = m.get(key)) {
+    for (char c : *s) {
+      if (c < '0' || c > '9') {
+        break;
+      }
+      v = v * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+  }
+  return v;
+}
+
+}  // namespace
+
+void StorageClient::pull_watermarks(WatermarkFn cb) {
+  helper_.send("pull_watermarks", {},
+               [cb = std::move(cb)](bool ok, const HelperMessage& reply) {
+                 std::uint64_t max_id = 0;
+                 std::uint64_t max_rank = 0;
+                 if (ok) {
+                   max_id = ParseU64(reply, "max_id");
+                   max_rank = ParseU64(reply, "max_rank");
+                 }
+                 if (cb) {
+                   cb(ok, max_id, max_rank);
+                 }
+               });
+}
+
 void StorageClient::pull_position(const std::string& user,
                                   const std::string& symbol, PositionFn cb) {
   helper_.send("pull_position", {{"user", user}, {"symbol", symbol}},

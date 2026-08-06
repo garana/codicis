@@ -225,4 +225,17 @@ func (s *myStore) PullLevels(ctx context.Context, symbol, side string, fromPrice
 	return out, rows.Err()
 }
 
+func (s *myStore) PullWatermarks(ctx context.Context) (uint64, uint64, error) {
+	var maxID, maxRank int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(id), 0) FROM orders`).Scan(&maxID); err != nil {
+		return 0, 0, err
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(seq), 0) FROM resting`).Scan(&maxRank); err != nil {
+		return 0, 0, err
+	}
+	return uint64(maxID), uint64(maxRank), nil
+}
+
 func (s *myStore) Close() error { return s.db.Close() }

@@ -82,13 +82,18 @@ may answer out of order (the response echoes `req_id`).
 | `commit`        | (none)                                   | committed=<highest write id>   |
 | `pull_position` | user, symbol                             | net=<int>                      |
 | `pull_levels`   | symbol, side, from_price, count          | symbol, side, orders=<blob>, count |
+| `pull_watermarks` | (none)                                 | max_id, max_rank               |
 | `ping`          | (none)                                   | (type pong)                    |
 
 `report_fill` decrements the resting order (removing it when `status=filled`)
 and updates the owner's net position (`buy` +, `sell` -). `pull_levels` returns
 the orders on `side` beyond `from_price` (worse than it) across at most `count`
 price levels, best price first and arrival (`seq`) order within a level; the
-`orders` blob is `id,price,leaves,seq` records joined by `;`.
+`orders` blob is `id,price,leaves,seq` records joined by `;`. `pull_watermarks`
+returns the largest order id ever reported (`max_id`, from `orders`) and the
+largest resting rank (`max_rank`, from `resting`); codicis calls it once on boot
+to seed its id/priority counters above anything durable, so post-restart orders
+never collide with -- or jump ahead of -- restored resting orders.
 
 ## Integration tests (Docker)
 

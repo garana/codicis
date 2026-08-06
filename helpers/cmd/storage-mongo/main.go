@@ -110,11 +110,11 @@ func validators() map[string]bson.M {
 			"required": required, "properties": props}}
 	}
 	return map[string]bson.M{
-		"orders": obj(bson.A{"_id", "symbol", "owner", "side", "price", "qty"},
-			bson.M{"_id": strT, "symbol": strT, "owner": strT,
+		"orders": obj(bson.A{"_id", "id", "symbol", "owner", "side", "price", "qty"},
+			bson.M{"_id": strT, "id": numT, "symbol": strT, "owner": strT,
 				"side": sideEnum, "price": numT, "qty": numT}),
-		"resting": obj(bson.A{"_id", "symbol", "side", "price", "leaves", "seq"},
-			bson.M{"_id": strT, "symbol": strT, "side": sideEnum,
+		"resting": obj(bson.A{"_id", "id", "symbol", "side", "price", "leaves", "seq"},
+			bson.M{"_id": strT, "id": numT, "symbol": strT, "side": sideEnum,
 				"price": numT, "leaves": numT, "seq": numT}),
 		"positions": obj(bson.A{"_id", "owner", "symbol", "net"},
 			bson.M{"_id": strT, "owner": strT, "symbol": strT, "net": numT}),
@@ -156,16 +156,17 @@ func (s *mongoStore) ensureIndexes(ctx context.Context) error {
 
 func (s *mongoStore) ReportOrder(ctx context.Context, o storage.Order) error {
 	_, err := s.orders.ReplaceOne(ctx, bson.M{"_id": key(o.Symbol, o.ID)},
-		bson.M{"_id": key(o.Symbol, o.ID), "symbol": o.Symbol, "owner": o.Owner,
-			"side": o.Side, "price": o.Price, "qty": o.Qty},
+		bson.M{"_id": key(o.Symbol, o.ID), "id": int64(o.ID), "symbol": o.Symbol,
+			"owner": o.Owner, "side": o.Side, "price": o.Price, "qty": o.Qty},
 		options.Replace().SetUpsert(true))
 	return err
 }
 
 func (s *mongoStore) ReportRest(ctx context.Context, r storage.RestingOrder) error {
 	_, err := s.resting.ReplaceOne(ctx, bson.M{"_id": key(r.Symbol, r.ID)},
-		bson.M{"_id": key(r.Symbol, r.ID), "symbol": r.Symbol, "side": r.Side,
-			"price": r.Price, "leaves": r.Leaves, "seq": int64(r.Seq)},
+		bson.M{"_id": key(r.Symbol, r.ID), "id": int64(r.ID), "symbol": r.Symbol,
+			"side": r.Side, "price": r.Price, "leaves": r.Leaves,
+			"seq": int64(r.Seq)},
 		options.Replace().SetUpsert(true))
 	return err
 }
@@ -279,6 +280,40 @@ func (s *mongoStore) PullLevels(ctx context.Context, symbol, side string, fromPr
 			Price: doc.Price, Leaves: doc.Leaves, Seq: uint64(doc.Seq)})
 	}
 	return out, cur.Err()
+}
+
+func (s *mongoStore) PullWatermarks(ctx context.Context) (uint64, uint64, error) {
+	maxID, err := s.maxInt64(ctx, s.orders, "id")
+	if err != nil {
+		return 0, 0, err
+	}
+	maxRank, err := s.maxInt64(ctx, s.resting, "seq")
+	if err != nil {
+		return 0, 0, err
+	}
+	return uint64(maxID), uint64(maxRank), nil
+}
+
+// maxInt64 returns the largest value of a numeric field in a collection (0 if
+// empty) via a descending FindOne.
+func (s *mongoStore) maxInt64(ctx context.Context, coll *mongo.Collection, field string) (int64, error) {
+	var doc bson.M
+	err := coll.FindOne(ctx, bson.M{},
+		options.FindOne().SetSort(bson.D{{Key: field, Value: -1}})).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	switch v := doc[field].(type) {
+	case int64:
+		return v, nil
+	case int32:
+		return int64(v), nil
+	default:
+		return 0, nil
+	}
 }
 
 func (s *mongoStore) Close() error { return nil }

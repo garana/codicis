@@ -55,6 +55,12 @@ func TestPostgresStore(t *testing.T) {
 		t.Fatalf("asks: %+v", asks)
 	}
 
+	// Watermarks reflect the largest order id and resting rank so far.
+	mid, mrank, werr := s.PullWatermarks(ctx)
+	if werr != nil || mid != 2 || mrank != 2 {
+		t.Fatalf("watermarks: id=%d rank=%d err=%v", mid, mrank, werr)
+	}
+
 	// A partial fill of the sell: 3 of 8, remaining 5.
 	must(t, s.ReportFill(ctx, storage.Fill{Symbol: "BTC", ID: 1, Qty: 3, Remaining: 5, Complete: false}))
 	asks, _ = s.PullLevels(ctx, "BTC", "sell", -9223372036854775808, 10)

@@ -103,6 +103,17 @@ class OrderBook {
   void set_symbol(Symbol symbol);
 
   /**
+   * @brief Seed the arrival/priority sequence counter (boot restart safety).
+   *
+   * Advances the internal `next_seq` to at least @p next so that every new
+   * order's `seq`/`rank` exceeds anything restored from storage -- preventing a
+   * post-restart order from jumping ahead of older resting orders. Monotonic:
+   * never lowers the counter.
+   * @param next The next sequence value to hand out (typically max rank + 1).
+   */
+  void set_next_seq(SeqNo next);
+
+  /**
    * @brief Take the orders that moved to the back of a level since the last
    *        call, each with a freshly re-stamped priority @c rank.
    *

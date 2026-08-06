@@ -531,6 +531,51 @@ TEST_CASE("Storage helper serves the resting book via pull_levels",
   REQUIRE(gone.size() == 1);   // id 1 fully filled and removed; only id 3 left
   REQUIRE(gone[0].id == 3);
 }
+
+TEST_CASE("Storage helper reports id/rank watermarks for boot seeding",
+          "[ipc][spawn][seed]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  Result<std::unique_ptr<HelperClient>> cr =
+      SpawnHelper(loop, {CODICIS_STORAGE_HELPER_PATH}, codec);
+  REQUIRE(cr.ok());
+  StorageClient storage(*cr.value());
+  auto pump = [&](const bool& done) {
+    for (int i = 0; i < 200 && !done; ++i) {
+      loop.run_once(5);
+    }
+  };
+
+  // Report two orders (ids 7, 42) and rest them with ranks 300 and 900.
+  bool d = false;
+  storage.report_order({{"symbol", "BTC"}, {"id", "7"}, {"side", "buy"},
+                        {"price", "100"}, {"qty", "5"}},
+                       nullptr);
+  storage.report_order({{"symbol", "BTC"}, {"id", "42"}, {"side", "sell"},
+                        {"price", "110"}, {"qty", "3"}},
+                       nullptr);
+  storage.report_rest("BTC", "buy", 7, 100, 5, 300, nullptr);
+  storage.report_rest("BTC", "sell", 42, 110, 3, 900,
+                      [&](bool) { d = true; });
+  pump(d);
+
+  bool got = false;
+  std::uint64_t max_id = 0;
+  std::uint64_t max_rank = 0;
+  storage.pull_watermarks([&](bool ok, std::uint64_t id, std::uint64_t rank) {
+    got = ok;
+    max_id = id;
+    max_rank = rank;
+  });
+  pump(got);
+  REQUIRE(got);
+  REQUIRE(max_id == 42);     // largest order id reported
+  REQUIRE(max_rank == 900);  // largest resting rank
+}
 #endif
 
 TEST_CASE("HelperClient times out a request with no response", "[ipc][timeout]") {

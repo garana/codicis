@@ -134,6 +134,17 @@ class TradingEngine {
    */
   void commit() { storage_.commit(nullptr); }
 
+  /**
+   * @brief Seed the id/priority counters from storage high-water marks.
+   *
+   * Pulls the largest durable order id and resting rank and advances
+   * next_order_id_ and every book's seq base above them, so orders accepted
+   * after a restart never collide with, or jump ahead of, restored orders.
+   * Must run (and complete) before the engine accepts any order.
+   * @param done Invoked once seeding completes (success or failure).
+   */
+  void seed_from_storage(std::function<void()> done);
+
   /** @return The number of orders reported but not yet placed. */
   std::size_t pending_placements() const { return pending_.size(); }
 

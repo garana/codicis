@@ -20,8 +20,16 @@ OrderBook& MatchingEngine::book_for(const Symbol& symbol) {
   // back here, where a global sequence is assigned before forwarding.
   ref.set_symbol(symbol);
   ref.set_event_sink(this);
+  ref.set_next_seq(seq_base_);  // start above anything restored from storage
   books_.emplace(symbol, std::move(book));
   return ref;
+}
+
+void MatchingEngine::set_seq_base(SeqNo base) {
+  seq_base_ = base;
+  for (auto& [symbol, book] : books_) {
+    book->set_next_seq(base);  // existing books too (monotonic)
+  }
 }
 
 void MatchingEngine::on_book_event(const BookEvent& ev) {

@@ -69,7 +69,8 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func isRead(t string) bool {
-	return t == "pull_levels" || t == "pull_position" || t == "ping"
+	return t == "pull_levels" || t == "pull_position" ||
+		t == "pull_watermarks" || t == "ping"
 }
 
 func (s *Server) noteWrite(reqID uint64) {
@@ -199,6 +200,16 @@ func (s *Server) handleRead(ctx context.Context, m *wire.Message) {
 		}
 		resp := &wire.Message{ReqID: m.ReqID, Type: m.Type}
 		resp.SetInt("net", net)
+		s.reply(resp)
+	case "pull_watermarks":
+		maxID, maxRank, err := s.store.PullWatermarks(ctx)
+		if err != nil {
+			s.ackErr(m.ReqID, m.Type, err.Error())
+			return
+		}
+		resp := &wire.Message{ReqID: m.ReqID, Type: m.Type}
+		resp.Set("max_id", strconv.FormatUint(maxID, 10))
+		resp.Set("max_rank", strconv.FormatUint(maxRank, 10))
 		s.reply(resp)
 	case "pull_levels":
 		symbol, _ := m.Get("symbol")

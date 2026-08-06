@@ -303,6 +303,22 @@ void TradingEngine::prune_filled(const Symbol& symbol,
   }
 }
 
+void TradingEngine::seed_from_storage(std::function<void()> done) {
+  storage_.pull_watermarks(
+      [this, done = std::move(done)](bool ok, std::uint64_t max_id,
+                                     std::uint64_t max_rank) {
+        if (ok) {
+          if (max_id + 1 > next_order_id_) {
+            next_order_id_ = max_id + 1;  // no id collision with restored orders
+          }
+          matching_.set_seq_base(max_rank + 1);  // new orders outrank restored
+        }
+        if (done) {
+          done();
+        }
+      });
+}
+
 void TradingEngine::report_requeued(const Symbol& symbol) {
   // Orders that moved to the back of a level get a fresh priority rank; update
   // their storage row (report_rest upserts by id) so pull_levels reconstructs

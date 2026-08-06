@@ -20,12 +20,12 @@ const side = { enum: ["buy", "sell"] };
 
 const schemas = {
   orders: {
-    required: ["_id", "symbol", "owner", "side", "price", "qty"],
-    properties: { _id: S, symbol: S, owner: S, side: side, price: N, qty: N },
+    required: ["_id", "id", "symbol", "owner", "side", "price", "qty"],
+    properties: { _id: S, id: N, symbol: S, owner: S, side: side, price: N, qty: N },
   },
   resting: {
-    required: ["_id", "symbol", "side", "price", "leaves", "seq"],
-    properties: { _id: S, symbol: S, side: side, price: N, leaves: N, seq: N },
+    required: ["_id", "id", "symbol", "side", "price", "leaves", "seq"],
+    properties: { _id: S, id: N, symbol: S, side: side, price: N, leaves: N, seq: N },
   },
   positions: {
     required: ["_id", "owner", "symbol", "net"],

@@ -50,6 +50,10 @@ func TestMySQLStore(t *testing.T) {
 	if err != nil || len(asks) != 1 || asks[0].Leaves != 8 {
 		t.Fatalf("asks: %+v err=%v", asks, err)
 	}
+	mid, mrank, werr := s.PullWatermarks(ctx)
+	if werr != nil || mid != 1 || mrank != 1 {
+		t.Fatalf("watermarks: id=%d rank=%d err=%v", mid, mrank, werr)
+	}
 	must(t, s.ReportFill(ctx, storage.Fill{Symbol: "BTC", ID: 1, Qty: 3, Remaining: 5, Complete: false}))
 	if net, _ := s.PullPosition(ctx, "u1", "BTC"); net != -3 {
 		t.Fatalf("position: %d", net)

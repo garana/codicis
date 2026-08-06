@@ -723,6 +723,23 @@ Linux (CI/container) during hardening.
       engine) are drained on the NEXT engine op for that symbol -- eventual, not
       lost. No storage-helper change (they were already agnostic to the ordering
       key's meaning).
+- [x] Boot restart safety -- seed counters from storage. On boot the monotonic
+      counters reset (OrderBook `next_seq`, engine `next_order_id_`), so without
+      seeding a post-restart order would collide with a restored order's id and
+      outrank restored resting orders (low seq/rank jumps the queue). Added a
+      `pull_watermarks` storage message returning `max_id` (largest order id
+      ever reported, from `orders`) + `max_rank` (largest resting rank, from
+      `resting`). `TradingEngine::seed_from_storage` sets `next_order_id_ =
+      max_id+1` and `MatchingEngine::set_seq_base(max_rank+1)` (applied to every
+      book via `OrderBook::set_next_seq`, monotonic). AppServer::start() runs it
+      and pumps the loop (bounded) BEFORE any listener accepts an order;
+      degrades with a warning if storage does not answer. A single GLOBAL seed
+      suffices (no per-level tracking) -- rank only advances when an order joins
+      the back of a level (rest / reprice / replenish). Implemented in the C++
+      reference helper + all three Go helpers (Mongo gained a numeric `id` field
+      + validator entry so max_id is queryable). Tested: test_ipc (helper
+      reports id/rank watermarks), test_engine (seed -> new order gets id 101 /
+      rank >= 501 above a 100/500 watermark), and the Go integration tests.
 - [~] Data helpers in Go (`helpers/`, separate Go module, deps vendored + a
       repo-local `.gocache` so nothing installs globally): reference storage +
       feed helpers. Chosen because the mature DB/broker clients live outside

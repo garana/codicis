@@ -352,6 +352,22 @@ Status AppServer::start() {
     auth_ = std::move(ar.value());
   }
 
+  // Seed the id/priority counters from storage BEFORE any listener accepts an
+  // order, so post-restart orders never collide with, or outrank, restored
+  // resting orders. Bounded wait: one storage round-trip; proceed (degraded)
+  // if it does not answer promptly rather than hang startup.
+  {
+    bool seeded = false;
+    engine_->seed_from_storage([&seeded]() { seeded = true; });
+    for (int i = 0; i < 2000 && !seeded; ++i) {
+      loop_.run_once(5);
+    }
+    if (!seeded) {
+      LogMessage(LogLevel::kWarn,
+                 "storage watermark seed did not complete; starting unseeded");
+    }
+  }
+
   setup_routes();
   const std::string addr = config_.get_string("net.bind_address").value();
 

@@ -87,6 +87,12 @@ type Store interface {
 	// arrival (seq) order within a level.
 	PullLevels(ctx context.Context, symbol, side string, fromPrice int64, count int) ([]RestingOrder, error)
 
+	// PullWatermarks returns the largest order id ever reported and the largest
+	// resting priority rank, so the engine can seed its id/priority counters
+	// above them on boot (avoiding id collisions and priority inversion after a
+	// restart).
+	PullWatermarks(ctx context.Context) (maxID, maxRank uint64, err error)
+
 	// Close releases the backend (connections, pools).
 	Close() error
 }

@@ -1272,6 +1272,12 @@ std::vector<Order> OrderBook::take_requeued() {
   return out;
 }
 
+void OrderBook::set_next_seq(SeqNo next) {
+  if (next > impl_->next_seq) {
+    impl_->next_seq = next;
+  }
+}
+
 void OrderBook::set_event_sink(BookEventSink* sink) {
   impl_->event_sink_ = sink;
 }

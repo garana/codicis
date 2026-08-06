@@ -52,6 +52,11 @@ func TestMongoStore(t *testing.T) {
 	if err != nil || len(asks) != 2 {
 		t.Fatalf("asks: %+v err=%v", asks, err)
 	}
+	// Watermarks: largest order id (2) and resting rank (2).
+	mid, mrank, werr := s.PullWatermarks(ctx)
+	if werr != nil || mid != 2 || mrank != 2 {
+		t.Fatalf("watermarks: id=%d rank=%d err=%v", mid, mrank, werr)
+	}
 	// Same-level ordering is by seq: order 1 then order 2.
 	if asks[0].ID != 1 || asks[1].ID != 2 {
 		t.Fatalf("seq order: %+v", asks)

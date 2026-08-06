@@ -278,6 +278,24 @@ HelperMessage Handle(State* st, const HelperMessage& req) {
     }
     resp.set("orders", blob);
     resp.set("count", std::to_string(levels));
+  } else if (req.type == "pull_watermarks") {
+    // High-water marks for boot seeding: the largest order id ever reported
+    // (id uniqueness) and the largest resting priority rank (time priority).
+    std::uint64_t max_id = 0;
+    for (const auto& [id, info] : st->order_info) {
+      max_id = std::max(max_id, id);
+    }
+    std::uint64_t max_rank = 0;
+    for (const auto& [key, prices] : st->resting) {
+      for (const auto& [price, orders] : prices) {
+        for (const RestingOrder& o : orders) {
+          max_rank = std::max(max_rank, o.seq);
+        }
+      }
+    }
+    resp.type = req.type;
+    resp.set("max_id", std::to_string(max_id));
+    resp.set("max_rank", std::to_string(max_rank));
   } else if (req.type == "ping") {
     resp.type = "pong";
   } else {

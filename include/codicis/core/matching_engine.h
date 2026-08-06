@@ -199,6 +199,13 @@ class MatchingEngine : public BookEventSink {
   std::size_t symbol_count() const { return books_.size(); }
 
   /**
+   * @brief Set the sequence base applied to every book created afterward, and
+   *        to existing books, so new orders' seq/rank exceed restored ones.
+   * @param base The next sequence value (typically the storage max rank + 1).
+   */
+  void set_seq_base(SeqNo base);
+
+  /**
    * @brief Register the downstream book-event consumer (nullptr to detach).
    *
    * The engine installs itself as each book's sink; events flow book -> engine
@@ -225,6 +232,7 @@ class MatchingEngine : public BookEventSink {
   std::unordered_map<Symbol, std::unique_ptr<OrderBook>> books_;
   BookEventSink* feed_sink_ = nullptr;  // downstream feed consumer (optional)
   SeqNo event_seq_ = 0;                 // global monotonic feed sequence
+  SeqNo seq_base_ = 1;                  // seed for new books (boot watermark)
 };
 
 }  // namespace codicis

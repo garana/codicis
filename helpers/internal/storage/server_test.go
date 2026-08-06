@@ -19,6 +19,8 @@ type fakeStore struct {
 	trades  int
 	pos     map[string]int64
 	levels  []RestingOrder
+	maxID   uint64
+	maxRank uint64
 }
 
 func (f *fakeStore) ReportOrder(_ context.Context, _ Order) error {
@@ -58,6 +60,9 @@ func (f *fakeStore) PullPosition(_ context.Context, user, symbol string) (int64,
 func (f *fakeStore) PullLevels(_ context.Context, _, _ string, _ int64, _ int) ([]RestingOrder, error) {
 	return f.levels, nil
 }
+func (f *fakeStore) PullWatermarks(_ context.Context) (uint64, uint64, error) {
+	return f.maxID, f.maxRank, nil
+}
 func (f *fakeStore) Close() error { return nil }
 
 func decodeAll(t *testing.T, b []byte) map[uint64]*wire.Message {
@@ -82,6 +87,8 @@ func TestServerDispatch(t *testing.T) {
 			{ID: 2, Price: 100, Leaves: 3, Seq: 2},
 			{ID: 3, Price: 99, Leaves: 7, Seq: 3},
 		},
+		maxID:   100,
+		maxRank: 900,
 	}
 
 	var in bytes.Buffer
@@ -110,6 +117,9 @@ func TestServerDispatch(t *testing.T) {
 	pl.SetInt("count", 10)
 	write(pl)
 
+	wm := &wire.Message{ReqID: 5, Type: "pull_watermarks"}
+	write(wm)
+
 	var out bytes.Buffer
 	srv := NewServer(f, &in, &out, 4)
 	if err := srv.Run(context.Background()); err != nil {
@@ -136,5 +146,11 @@ func TestServerDispatch(t *testing.T) {
 	}
 	if lv, _ := resp[4].Get("count"); lv != "2" { // two price levels: 100, 99
 		t.Fatalf("levels: %q", lv)
+	}
+	if v, _ := resp[5].Get("max_id"); v != "100" {
+		t.Fatalf("max_id: %q", v)
+	}
+	if v, _ := resp[5].Get("max_rank"); v != "900" {
+		t.Fatalf("max_rank: %q", v)
 	}
 }

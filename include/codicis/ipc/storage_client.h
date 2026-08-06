@@ -64,6 +64,15 @@ using PullFn = std::function<void(bool ok, std::vector<PulledOrder> orders)>;
 using PositionFn = std::function<void(bool ok, std::int64_t net)>;
 
 /**
+ * @brief Callback for a boot-time watermark pull.
+ * @param ok       True if the query succeeded.
+ * @param max_id   Largest order id ever reported (0 if none).
+ * @param max_rank Largest resting priority rank (0 if none).
+ */
+using WatermarkFn =
+    std::function<void(bool ok, std::uint64_t max_id, std::uint64_t max_rank)>;
+
+/**
  * @brief Storage-protocol client with an outbox and commit watermark.
  */
 class StorageClient {
@@ -159,6 +168,14 @@ class StorageClient {
    */
   void pull_position(const std::string& user, const std::string& symbol,
                      PositionFn cb);
+
+  /**
+   * @brief Pull boot-time high-water marks (largest order id + resting rank) so
+   *        the engine can seed its id/priority counters above anything durable,
+   *        avoiding id collisions and priority inversion after a restart.
+   * @param cb Invoked with the watermarks (or ok=false on failure).
+   */
+  void pull_watermarks(WatermarkFn cb);
 
   /** @return The number of reported entries not yet committed. */
   std::size_t processed_pending() const { return outbox_.size(); }
