@@ -37,6 +37,10 @@ func TestMongoStore(t *testing.T) {
 	if err := s.ensureIndexes(ctx); err != nil {
 		t.Fatalf("indexes: %v", err)
 	}
+	// Apply the $jsonSchema validators so the writes below must satisfy them.
+	if err := s.applyValidators(ctx); err != nil {
+		t.Fatalf("validators: %v", err)
+	}
 	const minI64 = -9223372036854775808
 
 	must(t, s.ReportOrder(ctx, storage.Order{Symbol: "BTC", ID: 1, Owner: "u1", Side: "sell", Price: 105, Qty: 8}))
@@ -59,6 +63,15 @@ func TestMongoStore(t *testing.T) {
 	}
 	if net, _ := s.PullPosition(ctx, "u1", "BTC"); net != -8 {
 		t.Fatalf("position: %d", net)
+	}
+
+	// The validator must reject a malformed write (a string price), which is
+	// exactly the class of bug a schemaless store would otherwise accept.
+	_, badErr := s.resting.InsertOne(ctx, map[string]interface{}{
+		"_id": "BAD|9", "symbol": "BTC", "side": "sell",
+		"price": "not-a-number", "leaves": int64(1), "seq": int64(9)})
+	if badErr == nil {
+		t.Fatal("expected the $jsonSchema validator to reject a string price")
 	}
 }
 

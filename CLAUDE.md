@@ -265,6 +265,27 @@ This file (Progress + To Design) is the durable project record. The plan file
     `intx::uint256` (which provide these) plug in and mis-instantiations fail
     cleanly. Centralize `to_string`/parse -- the std lib formats neither 128-
     nor 256-bit -- for storage-helper fields and JSON output.
+  - **DB mirrors the C++ width per market (operator decision).** When the
+    template lands, the storage schema must faithfully mirror each market's
+    precision -- NOT a "widest uniform type" shortcut. Each width class gets its
+    OWN full set of tables/collections (orders, resting, positions, fills,
+    trades) typed to that width (`BIGINT` for 64-bit; `NUMERIC`/`DECIMAL`/
+    `Decimal128` for wider), routed by a symbol->width registry. Partitions
+    can't vary column type, so genuinely separate tables. (Task: multi-precision
+    DB.) Note the latent `resting` gap: `pull_levels` sorts by `(price, seq)`
+    but `seq` is arrival order, never re-stamped on reprice/replenish -- see the
+    priority-rank vs arrival-seq task.
+  - **ETH / uint256 -- offer BOTH, per market (operator decision).** (1) Scaled
+    fixed-point where WE scale server-side (int64 price/qty on a per-instrument
+    tick/lot far coarser than 18 decimals, wider int128 notional; client sends
+    human units). (2) Full `uint256` (wei) for on-chain/on-chain-settled
+    fidelity. Hybrid: int64 matching + uint256 at the settlement boundary. The
+    uint256 markets take the wide table set, scaled-int64 markets the `BIGINT`
+    set. (Task: ETH numeric options.)
+  - Mongo storage helper now ships `$jsonSchema` validators (`schema/mongo.js`,
+    applied via `storage-mongo -migrate`) enforcing field presence + BSON types
+    (`int`/`long` for the 64-bit engine; a wide market's collections would
+    accept `decimal`). Recovers the type safety a schemaless store lacks.
 
 ## Build and test
 

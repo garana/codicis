@@ -56,8 +56,12 @@ Point codicis at one via `storage.helper_cmd`, e.g.:
 storage.helper_cmd = /path/to/storage-postgres -dsn postgres://.../codicis -migrate
 ```
 
-`-migrate` applies the schema on startup (idempotent `CREATE TABLE IF NOT
-EXISTS`). Writes (`report_*`, `commit`) are applied in strict arrival order;
+`-migrate` applies the schema on startup: for SQL that is idempotent
+`CREATE TABLE IF NOT EXISTS` (`schema/postgres.sql`, `schema/mysql.sql`); for
+Mongo it installs the `$jsonSchema` validators (`schema/mongo.js`) that enforce
+field presence and BSON types (rejecting e.g. a string price -- the class of bug
+a schemaless store would otherwise accept). Writes (`report_*`, `commit`) are
+applied in strict arrival order;
 reads (`pull_levels`, `pull_position`) run concurrently on the connection pool
 (`-read-concurrency`, default 8) -- matching the reader/writer split codicis
 expects.

@@ -33,6 +33,8 @@ import (
 func main() {
 	uri := flag.String("uri", os.Getenv("CODICIS_MONGO_URI"), "MongoDB URI")
 	dbName := flag.String("db", "codicis", "database name")
+	migrate := flag.Bool("migrate", false,
+		"apply $jsonSchema validators on startup (idempotent)")
 	readConc := flag.Int("read-concurrency", 8, "max concurrent Pull* reads")
 	flag.Parse()
 	if *uri == "" {
@@ -56,6 +58,11 @@ func main() {
 	if err := store.ensureIndexes(ctx); err != nil {
 		log.Fatalf("storage-mongo: indexes: %v", err)
 	}
+	if *migrate {
+		if err := store.applyValidators(ctx); err != nil {
+			log.Fatalf("storage-mongo: validators: %v", err)
+		}
+	}
 	srv := storage.NewServer(store, os.Stdin, os.Stdout, *readConc)
 	if err := srv.Run(ctx); err != nil {
 		log.Fatalf("storage-mongo: %v", err)
@@ -63,6 +70,7 @@ func main() {
 }
 
 type mongoStore struct {
+	db        *mongo.Database
 	orders    *mongo.Collection
 	resting   *mongo.Collection
 	positions *mongo.Collection
@@ -72,6 +80,7 @@ type mongoStore struct {
 
 func newMongoStore(db *mongo.Database) *mongoStore {
 	return &mongoStore{
+		db:        db,
 		orders:    db.Collection("orders"),
 		resting:   db.Collection("resting"),
 		positions: db.Collection("positions"),
@@ -83,6 +92,57 @@ func newMongoStore(db *mongo.Database) *mongoStore {
 // key composes the (symbol, id) primary key as a single string _id.
 func key(symbol string, id uint64) string {
 	return symbol + "|" + strconv.FormatUint(id, 10)
+}
+
+// num is the accepted BSON types for a 64-bit numeric field. A wide-precision
+// (128/256-bit) deployment would use a separate collection whose validator
+// accepts "decimal" instead (see task: multi-precision DB mirrors C++ widths).
+var num = bson.A{"int", "long"}
+
+// validators returns the $jsonSchema validator per collection, mirroring what
+// the helper writes. Kept in sync with schema/mongo.js.
+func validators() map[string]bson.M {
+	sideEnum := bson.M{"enum": bson.A{"buy", "sell"}}
+	strT := bson.M{"bsonType": "string"}
+	numT := bson.M{"bsonType": num}
+	obj := func(required bson.A, props bson.M) bson.M {
+		return bson.M{"$jsonSchema": bson.M{"bsonType": "object",
+			"required": required, "properties": props}}
+	}
+	return map[string]bson.M{
+		"orders": obj(bson.A{"_id", "symbol", "owner", "side", "price", "qty"},
+			bson.M{"_id": strT, "symbol": strT, "owner": strT,
+				"side": sideEnum, "price": numT, "qty": numT}),
+		"resting": obj(bson.A{"_id", "symbol", "side", "price", "leaves", "seq"},
+			bson.M{"_id": strT, "symbol": strT, "side": sideEnum,
+				"price": numT, "leaves": numT, "seq": numT}),
+		"positions": obj(bson.A{"_id", "owner", "symbol", "net"},
+			bson.M{"_id": strT, "owner": strT, "symbol": strT, "net": numT}),
+		"fills": obj(bson.A{"symbol", "id", "qty", "remaining", "complete"},
+			bson.M{"symbol": strT, "id": numT, "qty": numT, "remaining": numT,
+				"complete": bson.M{"bsonType": "bool"}}),
+		"trades": obj(bson.A{"symbol", "taker", "maker", "price", "qty"},
+			bson.M{"symbol": strT, "taker": numT, "maker": numT,
+				"price": numT, "qty": numT}),
+	}
+}
+
+// applyValidators installs (or updates) the $jsonSchema validator on each
+// collection. "moderate" level validates inserts and updates to already-valid
+// documents, so it never rejects on pre-existing data; "error" rejects a write
+// that violates the schema.
+func (s *mongoStore) applyValidators(ctx context.Context) error {
+	for name, v := range validators() {
+		// Ensure the collection exists (ignore "already exists").
+		_ = s.db.CreateCollection(ctx, name)
+		cmd := bson.D{{Key: "collMod", Value: name}, {Key: "validator", Value: v},
+			{Key: "validationLevel", Value: "moderate"},
+			{Key: "validationAction", Value: "error"}}
+		if err := s.db.RunCommand(ctx, cmd).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *mongoStore) ensureIndexes(ctx context.Context) error {
@@ -111,8 +171,9 @@ func (s *mongoStore) ReportRest(ctx context.Context, r storage.RestingOrder) err
 }
 
 func (s *mongoStore) ReportFill(ctx context.Context, f storage.Fill) error {
-	if _, err := s.fills.InsertOne(ctx, bson.M{"symbol": f.Symbol, "id": f.ID,
-		"qty": f.Qty, "remaining": f.Remaining, "complete": f.Complete}); err != nil {
+	if _, err := s.fills.InsertOne(ctx, bson.M{"symbol": f.Symbol,
+		"id": int64(f.ID), "qty": f.Qty, "remaining": f.Remaining,
+		"complete": f.Complete}); err != nil {
 		return err
 	}
 	// Attribute the position delta from the order's owner/side.
@@ -151,8 +212,9 @@ func (s *mongoStore) ReportCancel(ctx context.Context, symbol string, id uint64)
 }
 
 func (s *mongoStore) ReportTrade(ctx context.Context, t storage.Trade) error {
-	_, err := s.trades.InsertOne(ctx, bson.M{"symbol": t.Symbol, "taker": t.Taker,
-		"maker": t.Maker, "price": t.Price, "qty": t.Qty})
+	_, err := s.trades.InsertOne(ctx, bson.M{"symbol": t.Symbol,
+		"taker": int64(t.Taker), "maker": int64(t.Maker),
+		"price": t.Price, "qty": t.Qty})
 	return err
 }
 
