@@ -126,7 +126,15 @@ struct Order {
   Quantity min_qty = 0;     /**< Minimum executable quantity (0 = none). */
   Ticks discretion = 0;     /**< Discretionary band width (kDiscretion). */
 
-  SeqNo seq = 0;            /**< Arrival order -> time priority. */
+  SeqNo seq = 0;            /**< Arrival order (immutable); determinism/audit. */
+  SeqNo rank = 0;           /**< Priority rank within a level. Equals @c seq on
+                                 first rest, but is re-stamped to a fresh
+                                 monotonic value whenever the order moves to the
+                                 back of a level (peg reprice, iceberg
+                                 replenish). Storage's pull_levels orders by
+                                 rank, so a moved order reconstructs at the back
+                                 of the queue rather than keeping stale
+                                 priority. */
   Timestamp expiry_ns = 0;  /**< GTD/DAY expiry; 0 means no expiry. */
 
   std::optional<TriggerSpec> trigger;

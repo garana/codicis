@@ -203,6 +203,7 @@ void TradingEngine::on_pull(const Symbol& symbol, Side side,
     o.qty = po.leaves;
     o.leaves = po.leaves;
     o.seq = po.seq;
+    o.rank = po.seq;  // storage's ordering key is the priority rank
     matching_.insert_resident(symbol, o);
   }
   if (--depth_pulls_ == 0) {
@@ -230,6 +231,7 @@ CancelResult TradingEngine::cancel(const std::string& order_uuid,
   // storage resting book (authoritative for deep orders that are not in memory).
   matching_.cancel(symbol, id);
   storage_.report_cancel(symbol, id, nullptr);
+  report_requeued(symbol);  // cancelling a non-peg can reprice resting pegs
   // Race: if a deep pull is in flight it may carry a now-stale snapshot that
   // still contains this order; mark it so on_pull does not resurrect it.
   if (depth_pulls_ > 0) {
@@ -275,9 +277,10 @@ void TradingEngine::drain() {
         // (and so eviction/pull-back need no further storage write).
         const Order& ro = r.outcome.resting;
         storage_.report_rest(p.symbol, SideName(ro.side), ro.id, ro.price,
-                             ro.leaves, ro.seq, nullptr);
+                             ro.leaves, ro.rank, nullptr);
       }
       report_results(p.symbol, p.order, r.outcome);
+      report_requeued(p.symbol);  // pegs/icebergs that lost priority
       prune_filled(p.symbol, r.outcome);
     }
     if (p.cb) {
@@ -297,6 +300,16 @@ void TradingEngine::prune_filled(const Symbol& symbol,
         id_uuid_.erase(it);
       }
     }
+  }
+}
+
+void TradingEngine::report_requeued(const Symbol& symbol) {
+  // Orders that moved to the back of a level get a fresh priority rank; update
+  // their storage row (report_rest upserts by id) so pull_levels reconstructs
+  // the correct queue order and price.
+  for (const Order& o : matching_.take_requeued(symbol)) {
+    storage_.report_rest(symbol, SideName(o.side), o.id, o.price, o.leaves,
+                         o.rank, nullptr);
   }
 }
 
@@ -356,6 +369,7 @@ void TradingEngine::run_auction(const Symbol& symbol, bool opening,
                                   ? matching_.run_opening_auction(symbol)
                                   : matching_.run_closing_auction(symbol);
   report_auction(symbol, trades);
+  report_requeued(symbol);  // auction fills can cascade stops and reprice pegs
   if (cb) {
     cb(trades);
   }

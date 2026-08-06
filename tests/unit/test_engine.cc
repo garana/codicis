@@ -123,6 +123,19 @@ Order Limit(Side side, Ticks price, Quantity qty) {
   return o;
 }
 
+Order Peg(Side side, PegSpec::Ref ref, Ticks offset, Quantity qty) {
+  Order o;
+  o.side = side;
+  o.type = OrdType::Limit;
+  o.tif = Tif::GTC;
+  o.qty = qty;
+  PegSpec p;
+  p.ref = ref;
+  p.offset = offset;
+  o.peg = p;
+  return o;
+}
+
 }  // namespace
 
 TEST_CASE("Report-before-place keeps arrival order despite out-of-order acks",
@@ -223,6 +236,68 @@ TEST_CASE("Trades and fills are reported to storage", "[engine]") {
   }
   REQUIRE(trades == 1);
   REQUIRE(fills_filled == 2);  // both taker and maker fully filled
+
+  ::close(sp[1]);
+}
+
+TEST_CASE("A repriced peg is re-reported to storage with a new rank",
+          "[engine][rank]") {
+  SystemClock clock;
+  Result<std::unique_ptr<EventLoop>> lr = MakeEventLoop(&clock);
+  REQUIRE(lr.ok());
+  EventLoop& loop = *lr.value();
+
+  TextHelperCodec codec;
+  int sp[2];
+  MakePair(sp);
+  HelperClient client(loop, sp[0], sp[0], codec);
+  StorageClient storage(client);
+  MatchingEngine matching;
+  TradingEngine engine(matching, storage);
+  TestHelper helper{sp[1], codec, {}};
+
+  std::vector<HelperMessage> all;
+  auto pump = [&]() {
+    for (int i = 0; i < 30; ++i) {
+      for (const HelperMessage& m : helper.read_requests()) {
+        if (m.type == "report_order") {
+          helper.ack(m.req_id, "report_order");
+        }
+        all.push_back(m);
+      }
+      loop.run_once(2);
+    }
+  };
+
+  engine.submit("BTC", "", Limit(Side::Buy, 100, 5), nullptr);
+  pump();
+  engine.submit("BTC", "", Limit(Side::Sell, 110, 5), nullptr);
+  pump();
+  engine.submit("BTC", "", Peg(Side::Buy, PegSpec::Ref::Midpoint, 0, 5), nullptr);
+  pump();  // peg rests at 105 -> report_rest(price=105)
+  engine.submit("BTC", "", Limit(Side::Buy, 104, 5), nullptr);
+  pump();  // best non-peg bid -> peg reprices 105->107 -> report_rest(price=107)
+
+  // The peg's initial rest (105) and its reprice (107) are both report_rest for
+  // the SAME id; the reprice carries a larger rank (the "seq" wire field).
+  std::string id105, id107, seq105, seq107;
+  for (const HelperMessage& m : all) {
+    if (m.type != "report_rest") {
+      continue;
+    }
+    const std::string* price = m.get("price");
+    if (price != nullptr && *price == "105") {
+      id105 = *m.get("id");
+      seq105 = *m.get("seq");
+    } else if (price != nullptr && *price == "107") {
+      id107 = *m.get("id");
+      seq107 = *m.get("seq");
+    }
+  }
+  REQUIRE_FALSE(seq105.empty());          // initial rest reported
+  REQUIRE_FALSE(seq107.empty());          // reprice re-reported (report_requeued)
+  REQUIRE(id107 == id105);                // same order moved
+  REQUIRE(std::stoull(seq107) > std::stoull(seq105));  // re-stamped to the back
 
   ::close(sp[1]);
 }

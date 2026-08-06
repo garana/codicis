@@ -251,6 +251,19 @@ struct OrderBook::Impl {
   Symbol symbol_;                       // tags emitted book events
   BookEventSink* event_sink_ = nullptr; // nullptr disables emission
 
+  // Orders that moved to the back of a level this operation (peg reprice or
+  // iceberg replenish) with a freshly re-stamped rank; the engine drains these
+  // (take_requeued) to update their storage priority. Not the newly-submitted
+  // resting order -- that is reported from SubmitOutcome.resting.
+  std::vector<Order> requeued_;
+
+  /** @brief Re-stamp @p o's priority rank to the back of the queue and record
+   *  it for storage re-reporting. */
+  void requeue(Order& o) {
+    o.rank = next_seq++;
+    requeued_.push_back(o);
+  }
+
   /**
    * @brief Emit an Add/Cancel/Replenish/Trigger event for order @p o.
    * @param qty       The matchable quantity (leaves, or the new slice).
@@ -562,6 +575,7 @@ struct OrderBook::Impl {
         me.pos = std::prev(lvl.fifo.end());
         me.slice = std::min(me.order.display_qty, me.order.leaves);
         lvl.displayed += me.slice;
+        requeue(me.order);  // re-queued at the back: new priority rank
         // The refreshed slice becomes lit again (total is unchanged).
         emit_event(BookEventType::kReplenish, me.order, me.slice, me.slice);
         it = next;
@@ -1029,6 +1043,7 @@ struct OrderBook::Impl {
     nl.total += e.order.leaves;
     nl.displayed += DisplayedOf(e.order.flags, e.order.leaves, e.slice);
     L.on_added(new_price);
+    requeue(e.order);  // moved to the back of the new level: new priority rank
     emit_reprice(e.order, old_price, new_price, e.order.leaves,
                  DisplayedOf(e.order.flags, e.order.leaves, e.slice));
   }
@@ -1251,6 +1266,12 @@ void OrderBook::set_symbol(Symbol symbol) {
   impl_->symbol_ = std::move(symbol);
 }
 
+std::vector<Order> OrderBook::take_requeued() {
+  std::vector<Order> out;
+  out.swap(impl_->requeued_);
+  return out;
+}
+
 void OrderBook::set_event_sink(BookEventSink* sink) {
   impl_->event_sink_ = sink;
 }
@@ -1258,6 +1279,7 @@ void OrderBook::set_event_sink(BookEventSink* sink) {
 SubmitOutcome OrderBook::submit(Order order) {
   Normalize(&order);
   order.seq = impl_->next_seq++;
+  order.rank = order.seq;  // initial priority rank == arrival order
 
   SubmitOutcome out;
   out.order_id = order.id;

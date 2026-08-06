@@ -103,6 +103,18 @@ class OrderBook {
   void set_symbol(Symbol symbol);
 
   /**
+   * @brief Take the orders that moved to the back of a level since the last
+   *        call, each with a freshly re-stamped priority @c rank.
+   *
+   * Populated by peg reprices and iceberg replenishes (which lose time
+   * priority). The engine drains this after every operation to update the
+   * order's storage priority (report_rest with the new rank/price), so
+   * pull_levels reconstructs the correct queue order. Clears the buffer.
+   * @return The requeued orders (empty if none moved).
+   */
+  std::vector<Order> take_requeued();
+
+  /**
    * @brief Install the book-event sink (nullptr disables emission).
    *
    * When set, the book calls @p sink synchronously for every Add/Cancel/Trade

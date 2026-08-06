@@ -48,6 +48,14 @@ bool MatchingEngine::cancel(const Symbol& symbol, OrderId id) {
   return it != books_.end() && it->second->cancel(id);
 }
 
+std::vector<Order> MatchingEngine::take_requeued(const Symbol& symbol) {
+  const auto it = books_.find(symbol);
+  if (it == books_.end()) {
+    return {};
+  }
+  return it->second->take_requeued();
+}
+
 const Order* MatchingEngine::find(const Symbol& symbol, OrderId id) const {
   const OrderBook* book = book_of(symbol);
   return book == nullptr ? nullptr : book->find(id);

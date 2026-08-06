@@ -190,6 +190,12 @@ class TradingEngine {
   void report_results(const Symbol& symbol, const Order& taker,
                       const SubmitOutcome& out);
 
+  /**
+   * @brief Re-report any orders re-queued (peg reprice / iceberg replenish) in
+   *        the symbol's book, so storage learns their new price + priority rank.
+   */
+  void report_requeued(const Symbol& symbol);
+
   /** @brief Report a batch of auction trades and per-order fills to storage. */
   void report_auction(const Symbol& symbol, const std::vector<Trade>& trades);
 

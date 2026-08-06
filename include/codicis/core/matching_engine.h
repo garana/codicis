@@ -182,6 +182,14 @@ class MatchingEngine : public BookEventSink {
    */
   bool worst_resident(const Symbol& symbol, Side side, Ticks* out) const;
 
+  /**
+   * @brief Take the orders re-queued (peg reprice / iceberg replenish) in a
+   *        symbol's book since the last call, with re-stamped ranks.
+   * @param symbol The instrument.
+   * @return The requeued orders (empty for an unknown symbol or none moved).
+   */
+  std::vector<Order> take_requeued(const Symbol& symbol);
+
   /** @return Whether a book exists for the symbol. */
   bool has_symbol(const Symbol& symbol) const {
     return books_.find(symbol) != books_.end();

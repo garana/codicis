@@ -1010,6 +1010,59 @@ TEST_CASE("An unbounded book (mem_levels 0) never rests deep", "[core][window]")
   REQUIRE_FALSE(book.has_deep(Side::Buy));
 }
 
+// ---- Priority rank vs arrival seq (re-stamp on move-to-back) ----------------
+
+TEST_CASE("A repriced peg gets a fresh priority rank (moves to the back)",
+          "[core][rank]") {
+  OrderBook book;
+  book.submit(Limit(1, Side::Buy, 100, 5));
+  book.submit(Limit(2, Side::Sell, 110, 5));
+  book.submit(Peg(3, Side::Buy, PegSpec::Ref::Midpoint, 0, 5));  // rests 105
+  REQUIRE(book.find(3)->price == 105);
+  const SeqNo rank_before = book.find(3)->rank;
+  REQUIRE(rank_before == book.find(3)->seq);  // initial rank == arrival seq
+
+  // A better non-peg bid moves the reference; the peg reprices to 107.
+  book.submit(Limit(4, Side::Buy, 104, 5));
+  REQUIRE(book.find(3)->price == 107);
+  // It lost time priority: the rank is re-stamped above its arrival seq and
+  // above the later-arrived order 4.
+  REQUIRE(book.find(3)->rank > rank_before);
+  REQUIRE(book.find(3)->rank > book.find(4)->rank);
+
+  // take_requeued surfaces the moved order (new price + rank) for the engine
+  // to re-report to storage, and clears the buffer.
+  const auto rq = book.take_requeued();
+  REQUIRE(rq.size() == 1);
+  REQUIRE(rq[0].id == 3);
+  REQUIRE(rq[0].price == 107);
+  REQUIRE(rq[0].rank == book.find(3)->rank);
+  REQUIRE(book.take_requeued().empty());
+}
+
+TEST_CASE("A replenished iceberg gets a fresh priority rank", "[core][rank]") {
+  OrderBook book;
+  book.submit(Iceberg(1, Side::Buy, 100, 10, 3));  // slice 3, reserve 10
+  book.submit(Limit(2, Side::Buy, 100, 5));        // queued behind
+  const SeqNo ice_rank_before = book.find(1)->rank;
+
+  // A sell consuming exactly the slice replenishes and re-queues the iceberg.
+  book.submit(Limit(3, Side::Sell, 100, 3));
+  REQUIRE(book.find(1) != nullptr);                    // reserve remains
+  REQUIRE(book.find(1)->rank > ice_rank_before);       // moved to the back
+  REQUIRE(book.find(1)->rank > book.find(2)->rank);    // now behind order 2
+
+  const auto rq = book.take_requeued();
+  bool saw = false;
+  for (const auto& o : rq) {
+    if (o.id == 1) {
+      saw = true;
+      REQUIRE(o.rank == book.find(1)->rank);
+    }
+  }
+  REQUIRE(saw);
+}
+
 // ---- Book-event stream, slice 2 (reprice / replenish / trigger) ------------
 
 TEST_CASE("A repricing peg emits a Reprice event", "[core][feed]") {

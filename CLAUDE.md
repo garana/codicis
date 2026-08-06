@@ -272,9 +272,7 @@ This file (Progress + To Design) is the durable project record. The plan file
     trades) typed to that width (`BIGINT` for 64-bit; `NUMERIC`/`DECIMAL`/
     `Decimal128` for wider), routed by a symbol->width registry. Partitions
     can't vary column type, so genuinely separate tables. (Task: multi-precision
-    DB.) Note the latent `resting` gap: `pull_levels` sorts by `(price, seq)`
-    but `seq` is arrival order, never re-stamped on reprice/replenish -- see the
-    priority-rank vs arrival-seq task.
+    DB.)
   - **ETH / uint256 -- offer BOTH, per market (operator decision).** (1) Scaled
     fixed-point where WE scale server-side (int64 price/qty on a per-instrument
     tick/lot far coarser than 18 decimals, wider int128 notional; client sends
@@ -705,6 +703,25 @@ Linux (CI/container) during hardening.
       request lines from a file (its stand-in external source). test_app spawns
       it and confirms a relayed order rests on the book. Reuses the metrics
       counters.
+- [x] Priority rank vs arrival seq (matching engine): `Order` now carries a
+      mutable `rank` beside the immutable arrival `seq`. `rank` == `seq` on first
+      rest, but is re-stamped to a fresh monotonic value (`next_seq++`) whenever
+      the order moves to the back of a level -- peg reprice (`move_pegged`) and
+      iceberg replenish. The book buffers these moved orders; `OrderBook::
+      take_requeued()` / `MatchingEngine::take_requeued(symbol)` drain them, and
+      `TradingEngine::report_requeued` re-`report_rest`s each (new price + rank)
+      after submit/cancel/auction, so storage's `pull_levels` (which orders by
+      the `seq` wire field = rank now) reconstructs the true queue order instead
+      of giving a repriced order stale priority. `report_rest` for the newly
+      resting order sends `rank`; pull-back sets `rank` from the stored value.
+      Determinism sorts (stop firing, peg reprice pass) still use arrival `seq`.
+      Tested: test_order_book (a repriced peg / replenished iceberg gets a rank
+      above later arrivals; take_requeued surfaces it) and test_engine (the
+      reprice is re-reported with a larger rank). RESIDUAL: expiry-triggered
+      reprices (AppServer's direct `matching_.expire`, not routed through the
+      engine) are drained on the NEXT engine op for that symbol -- eventual, not
+      lost. No storage-helper change (they were already agnostic to the ordering
+      key's meaning).
 - [~] Data helpers in Go (`helpers/`, separate Go module, deps vendored + a
       repo-local `.gocache` so nothing installs globally): reference storage +
       feed helpers. Chosen because the mature DB/broker clients live outside
