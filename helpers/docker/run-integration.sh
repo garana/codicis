@@ -15,10 +15,15 @@ ROOT=$(cd "$HERE/.." && pwd)             # helpers
 COMPOSE=${COMPOSE:-docker compose}
 CF="$HERE/docker-compose.yml"
 
-# Offline, reproducible build from vendor/.
+# Offline, reproducible build from vendor/ with the tree-local pinned Go
+# (fetched by tools/bootstrap-go.sh; the Makefile passes GO=, else fall back to
+# the tree-local path so this runs standalone too).
 export GOFLAGS=-mod=vendor
 export GOTOOLCHAIN=local
 export GOMODCACHE="$ROOT/.gocache"
+export GOROOT="$ROOT/.toolchain/go"
+GO="${GO:-$ROOT/.toolchain/go/bin/go}"
+"$ROOT/tools/bootstrap-go.sh"   # ensure the pinned Go is present
 
 cleanup() {
   if [ "${KEEP_UP:-0}" != "1" ]; then
@@ -95,7 +100,7 @@ run() { # <label> <go test args...>
   label=$1
   shift
   printf '=== %s\n' "$label"
-  if go test "$@"; then :; else fails="$fails $label"; fi
+  if "$GO" test "$@"; then :; else fails="$fails $label"; fi
 }
 
 run storage-postgres -tags integration ./cmd/storage-postgres/

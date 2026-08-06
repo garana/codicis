@@ -31,16 +31,26 @@ pulls in `pgx` and nothing MySQL/Mongo-related.
 
 ## Build
 
-Dependencies are **vendored** under `vendor/`, and when re-resolving they are
-cached in a repo-local `.gocache` (never the global module cache), so builds are
-reproducible and self-contained:
+The build is fully self-contained and does **not** use any globally installed
+Go:
+
+- The **Go toolchain is pinned and tree-local.** `make` first runs
+  `tools/bootstrap-go.sh`, which downloads the pinned Go SDK (checksum-verified)
+  into a gitignored `./.toolchain/` and points `GOROOT`/`GO` at it. Bootstrapping
+  needs only `curl`, `tar`, and a sha256 tool -- no pre-existing Go.
+- **Dependencies are vendored** under `vendor/` (never the global module cache),
+  and `GOTOOLCHAIN=local` means no toolchain re-exec/download at build time.
 
 ```
 cd helpers
-make build          # -> bin/storage-postgres, bin/storage-mysql, bin/storage-mongo
+make build          # bootstraps ./.toolchain (once), then builds every helper
 make test           # unit tests (wire codec + protocol dispatch; no services)
 make vendor         # re-resolve + re-vendor after changing deps
 ```
+
+The module targets Go 1.25 (`go.mod`); the pinned version lives in
+`tools/bootstrap-go.sh`. The testcontainers-based integration module (below)
+reuses the same tree-local Go.
 
 ## Storage helpers
 

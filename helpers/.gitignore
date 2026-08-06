@@ -11,3 +11,6 @@
 
 # Go test binaries.
 *.test
+
+# Tree-local pinned Go SDK (fetched by tools/bootstrap-go.sh).
+/.toolchain/
