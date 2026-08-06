@@ -701,13 +701,20 @@ Linux (CI/container) during hardening.
             with no services; `-tags integration` tests drive each Store through
             a full lifecycle against real Postgres/MySQL/Mongo in
             docker-compose (`docker/`) -- all three green.
-      - [~] Feed fan-out bridges: subscribe to the feed-helper's TCP JSON
+      - [x] Feed fan-out bridges: subscribe to the feed-helper's TCP JSON
             stream and republish per-symbol to a broker. Shared `internal/feed`
             does the connect/read/reconnect loop once (best-effort: reconnect +
-            re-snapshot on drop); each bridge supplies a Sink. All pure-Go
-            clients (no CGO). DONE: feed-redis (PUBLISH channel) and feed-nats
-            (subject), both with integration tests (fake feed source -> bridge
-            -> real broker -> subscriber) green in docker-compose. TODO:
-            Kafka, AMQP/RabbitMQ, MQTT, ZeroMQ, AWS SNS/SQS (same Sink shape).
+            re-snapshot on drop); each bridge supplies a Sink. ALL eight are
+            pure-Go (no CGO -- verified building with CGO_ENABLED=0), each
+            linking only its own client: feed-redis (go-redis), feed-nats
+            (nats.go), feed-kafka (segmentio/kafka-go), feed-rabbitmq
+            (amqp091-go), feed-mqtt (paho, EPL-2.0/EDL-1.0), feed-zeromq
+            (go-zeromq/zmq4 -- pure Go, no libzmq), feed-sns + feed-sqs
+            (aws-sdk-go-v2, LocalStack-compatible via -endpoint). Each has an
+            integration test (fake feed source -> bridge -> real broker ->
+            consumer); all green against redis/nats/kafka/rabbitmq/mosquitto and
+            LocalStack in docker-compose (ZeroMQ needs no broker). Dep licenses
+            re-audited: all MIT/Apache/BSD except mysql (MPL) + paho (EPL),
+            both weak file-level and used unmodified -- no GPL/LGPL.
       NB the Go helpers are OUTSIDE the C++ CMake build; the C++ reference
       helpers (tools/) remain the in-tree contract tests.

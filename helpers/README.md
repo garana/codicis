@@ -112,32 +112,56 @@ shared `internal/feed` runtime does the connect / read / reconnect loop once
 (the feed is best-effort: on a dropped connection the bridge reconnects and the
 helper re-snapshots); each bridge binary supplies only a `Sink`.
 
-| Broker | Binary       | Client            | Destination                    |
-| ------ | ------------ | ----------------- | ------------------------------ |
-| Redis  | `feed-redis` | redis/go-redis    | PUBLISH channel `<prefix><sym>`|
-| NATS   | `feed-nats`  | nats-io/nats.go   | subject `<prefix><sym>`        |
+| Broker        | Binary          | Client (pure-Go)        | Destination                       |
+| ------------- | --------------- | ----------------------- | --------------------------------- |
+| Redis         | `feed-redis`    | redis/go-redis          | PUBLISH channel `<prefix><sym>`   |
+| NATS          | `feed-nats`     | nats-io/nats.go         | subject `<prefix><sym>`           |
+| Kafka         | `feed-kafka`    | segmentio/kafka-go      | topic `<prefix><sym>`, keyed by sym |
+| RabbitMQ/AMQP | `feed-rabbitmq` | rabbitmq/amqp091-go     | topic exchange, routing `<prefix><sym>` |
+| MQTT          | `feed-mqtt`     | eclipse/paho.mqtt.golang| topic `<prefix><sym>`             |
+| ZeroMQ        | `feed-zeromq`   | go-zeromq/zmq4          | PUB `[<prefix><sym>, payload]`    |
+| AWS SNS       | `feed-sns`      | aws-sdk-go-v2           | Publish to a topic ARN            |
+| AWS SQS       | `feed-sqs`      | aws-sdk-go-v2           | SendMessage to a queue URL        |
 
-More brokers (Kafka, AMQP/RabbitMQ, MQTT, ZeroMQ, AWS SNS/SQS) follow the same
-`Sink` shape and are added alongside their `docker/` services.
-
-Run a bridge against a running feed-helper:
+Every client is pure-Go (no CGO / no system C libs), so each binary links only
+its own driver. Run a bridge against a running feed-helper:
 
 ```
-feed-redis -feed 127.0.0.1:9100 -redis localhost:6379 -prefix md.
+feed-redis    -feed 127.0.0.1:9100 -redis localhost:6379 -prefix md.
+feed-kafka    -feed 127.0.0.1:9100 -brokers localhost:9092 -prefix md.
+feed-rabbitmq -feed 127.0.0.1:9100 -amqp amqp://guest:guest@localhost:5672/
+feed-sqs      -feed 127.0.0.1:9100 -queue "$SQS_URL" -endpoint "$AWS_ENDPOINT_URL"
 ```
 
 Integration tests (gated on the broker env var) stand up a fake feed source and
 assert the bridge republishes to the real broker:
 
 ```
-docker compose -f docker/docker-compose.yml up -d redis nats
+docker compose -f docker/docker-compose.yml up -d      # all brokers
 CODICIS_REDIS_ADDR=localhost:6379 go test -tags integration ./cmd/feed-redis/
 CODICIS_NATS_URL=nats://localhost:4222 go test -tags integration ./cmd/feed-nats/
+CODICIS_KAFKA_BROKERS=localhost:9092  go test -tags integration ./cmd/feed-kafka/
+CODICIS_AMQP_URL=amqp://codicis:codicis@localhost:5672/ \
+  go test -tags integration ./cmd/feed-rabbitmq/
+CODICIS_MQTT_URL=tcp://localhost:1883 go test -tags integration ./cmd/feed-mqtt/
+go test ./cmd/feed-zeromq/            # ZeroMQ is pure-Go: no broker needed
+AWS_ENDPOINT_URL=http://localhost:4566 AWS_REGION=us-east-1 \
+  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+  go test -tags integration ./cmd/feed-sqs/ ./cmd/feed-sns/   # LocalStack
 ```
 
 ## Third-party licenses
 
-Every vendored dependency is permissively licensed (MIT, Apache-2.0, BSD-3, and
-MPL-2.0 for the MySQL driver) -- none are GPL/LGPL, so vendoring and
-redistribution are compatible with codicis's own license. Each dependency's
-license text is retained under `vendor/`.
+Every vendored dependency is permissively licensed and **none are GPL/LGPL**, so
+vendoring and redistribution are compatible with codicis's own license:
+
+- MIT: pgx, segmentio/kafka-go, xxhash, montanaflynn/stats, youmark/pkcs8
+- Apache-2.0: mongo-driver, nats.go, aws-sdk-go-v2, xdg-go/*
+- BSD-2/3: redis/go-redis, rabbitmq/amqp091-go, go-zeromq/zmq4, golang.org/x/*,
+  gorilla/websocket, pierrec/lz4, snappy, klauspost/compress
+- MPL-2.0 (weak, file-level; used unmodified): go-sql-driver/mysql
+- EPL-2.0 (weak, file-level; used unmodified): eclipse/paho.mqtt.golang -- only
+  the `feed-mqtt` binary; an operator wanting strictly-permissive-only deps can
+  skip it.
+
+Each dependency's license text is retained under `vendor/`.

@@ -8,7 +8,8 @@ export GOTOOLCHAIN := local
 
 # Each backend is its own binary linking only its own driver.
 STORAGE := storage-postgres storage-mysql storage-mongo
-FEED    := feed-redis feed-nats
+FEED    := feed-redis feed-nats feed-kafka feed-rabbitmq feed-mqtt \
+           feed-zeromq feed-sns feed-sqs
 HELPERS := $(STORAGE) $(FEED)
 
 .PHONY: all build test vendor tidy clean
