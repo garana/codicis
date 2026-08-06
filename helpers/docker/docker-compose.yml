@@ -1,0 +1,46 @@
+# Backing services for the codicis data-helper integration tests.
+#
+#   docker compose -f helpers/docker/docker-compose.yml up -d
+#   # then, from helpers/:
+#   CODICIS_PG_DSN='postgres://codicis:codicis@localhost:5432/codicis?sslmode=disable' \
+#     make integration-postgres
+#
+# Databases are here now; message-queue brokers (Kafka, RabbitMQ, NATS, Redis,
+# MQTT, LocalStack for SNS/SQS) are added alongside the feed-fanout helpers.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: codicis
+      POSTGRES_PASSWORD: codicis
+      POSTGRES_DB: codicis
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codicis"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: codicis
+      MYSQL_USER: codicis
+      MYSQL_PASSWORD: codicis
+    ports: ["3306:3306"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pcodicis"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

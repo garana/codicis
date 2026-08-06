@@ -684,3 +684,25 @@ Linux (CI/container) during hardening.
       request lines from a file (its stand-in external source). test_app spawns
       it and confirms a relayed order rests on the book. Reuses the metrics
       counters.
+- [~] Data helpers in Go (`helpers/`, separate Go module, deps vendored + a
+      repo-local `.gocache` so nothing installs globally): reference storage +
+      feed helpers. Chosen because the mature DB/broker clients live outside
+      C++, and the helper-process boundary keeps those 3P deps out of the
+      matcher's address space (each binary links only its own driver). Shared
+      code (`internal/wire` text codec, `internal/storage` Store interface +
+      protocol dispatch with ordered writes / concurrent Pull* reads) is
+      written once; each backend is a thin adapter.
+      - [x] Storage: `storage-postgres` (pgx), `storage-mysql`
+            (go-sql-driver), `storage-mongo` (mongo-driver). Full protocol
+            (report_order/rest/fill/cancel/trade, commit watermark,
+            pull_position, pull_levels blob), schema DDL (`schema/`, applied via
+            `-migrate`), position attribution on fill, reader/writer split.
+            Unit tests (wire round-trip, protocol dispatch via a fake Store) run
+            with no services; `-tags integration` tests drive each Store through
+            a full lifecycle against real Postgres/MySQL/Mongo in
+            docker-compose (`docker/`) -- all three green.
+      - [ ] Feed fan-out bridges (Kafka/SNS/SQS/AMQP/RabbitMQ/NATS/Redis/MQTT/
+            ZeroMQ): subscribe to the feed-helper stream and republish per
+            broker; all pure-Go clients (no CGO). Next.
+      NB the Go helpers are OUTSIDE the C++ CMake build; the C++ reference
+      helpers (tools/) remain the in-tree contract tests.

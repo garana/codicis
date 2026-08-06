@@ -1,0 +1,13 @@
+# Local module cache (use `GOMODCACHE=$PWD/.gocache` to keep fetches out of the
+# global cache); the resolved deps are committed under vendor/ instead.
+/.gocache/
+
+# Built helper binaries (produced by `go build ./cmd/...`).
+/bin/
+/storage-postgres
+/storage-mysql
+/storage-mongo
+/feed-*
+
+# Go test binaries.
+*.test
