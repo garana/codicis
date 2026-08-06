@@ -238,3 +238,10 @@ P0 build skeleton (done) -> P1 config -> P2 event loop -> P3 HTTP ->
 P4 WebSocket -> P5 IPC helpers -> P6 wiring/core seam -> OT0-OT8 order types ->
 H2 hardening (parser fuzzing, bounded outbox + backpressure, Linux/epoll
 validation, load tests). TLS is offloaded to an edge proxy, not built here.
+
+## License
+
+`codicis` is source-available under the [PolyForm Noncommercial License
+1.0.0](LICENSE). Noncommercial use is free under those terms; any commercial use
+— including production use, hosting `codicis`, or offering it as a service —
+requires a separate commercial license. See [COMMERCIAL.md](COMMERCIAL.md).
