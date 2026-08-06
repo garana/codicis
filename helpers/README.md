@@ -103,6 +103,18 @@ Each test drives its `Store` through a full order lifecycle (rest -> pull ->
 partial fill -> position -> complete fill -> cancel) against the real database.
 Without the env var set, the test skips.
 
+### One command (CI / clean-room)
+
+`make integration` runs `docker/run-integration.sh`, which brings up every
+backing service, waits for readiness, runs all storage + feed integration tests
+against them with the right env, tears down, and exits non-zero on any failure.
+It builds from `vendor/` (offline) and is what a clean-room / CI job invokes:
+
+```
+make -C helpers integration        # ~30s once images are pulled
+KEEP_UP=1 make -C helpers integration   # leave services up for debugging
+```
+
 ## Feed helpers
 
 The market-data fan-out bridges subscribe to the codicis feed-helper's TCP

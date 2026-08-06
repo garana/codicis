@@ -26,9 +26,15 @@ build: ## build every helper into ./bin
 test: ## run the unit tests (no external services needed)
 	go test ./internal/...
 
-# Integration tests need a running backing service; point the DSN at it.
+# Full integration: bring up every backing service (docker-compose), run all
+# helper integration tests against them, then tear down. This is what the
+# clean-room invokes.
+integration: ## docker up -> run all integration tests -> docker down
+	./docker/run-integration.sh
+
+# Individual integration tests expect a running service; point the env at it.
 integration-postgres:
-	CODICIS_PG_DSN?=; go test -tags integration ./cmd/storage-postgres/
+	go test -tags integration ./cmd/storage-postgres/
 integration-mysql:
 	go test -tags integration ./cmd/storage-mysql/
 integration-mongo:

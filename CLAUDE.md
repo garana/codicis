@@ -716,5 +716,11 @@ Linux (CI/container) during hardening.
             LocalStack in docker-compose (ZeroMQ needs no broker). Dep licenses
             re-audited: all MIT/Apache/BSD except mysql (MPL) + paho (EPL),
             both weak file-level and used unmodified -- no GPL/LGPL.
+      - [x] Integration harness: `helpers/docker/run-integration.sh` (and
+            `make integration`) brings up every backing service via
+            docker-compose, waits for readiness, runs all 11 helper integration
+            tests against them (offline, from vendor/), tears down, and exits
+            non-zero on any failure -- the one command a clean-room/CI invokes.
+            Verified locally end-to-end (~30s), all green.
       NB the Go helpers are OUTSIDE the C++ CMake build; the C++ reference
       helpers (tools/) remain the in-tree contract tests.
