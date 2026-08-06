@@ -704,8 +704,9 @@ Linux (CI/container) during hardening.
       it and confirms a relayed order rests on the book. Reuses the metrics
       counters.
 - [x] Priority rank vs arrival seq (matching engine): `Order` now carries a
-      mutable `rank` beside the immutable arrival `seq`. `rank` == `seq` on first
-      rest, but is re-stamped to a fresh monotonic value (`next_seq++`) whenever
+      mutable `rank` beside the immutable arrival `seq`. `rank` == `seq` on
+      first rest, but is re-stamped to a fresh monotonic value (`next_seq++`)
+      whenever
       the order moves to the back of a level -- peg reprice (`move_pegged`) and
       iceberg replenish. The book buffers these moved orders; `OrderBook::
       take_requeued()` / `MatchingEngine::take_requeued(symbol)` drain them, and
