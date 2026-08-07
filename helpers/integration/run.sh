@@ -19,9 +19,8 @@ GO="$HELPERS/.toolchain/go/bin/go"
 export GOROOT="$HELPERS/.toolchain/go"
 export GOTOOLCHAIN=local
 
-# Build the helper binaries the black-box tests os/exec.
-(cd "$HELPERS" && "$GO" build -mod=vendor -o bin/storage-postgres ./cmd/storage-postgres)
-export CODICIS_STORAGE_POSTGRES_BIN="$HELPERS/bin/storage-postgres"
+# Build every helper binary the black-box tests os/exec (one per ./cmd/*).
+(cd "$HELPERS" && "$GO" build -mod=vendor -o bin/ ./cmd/...)
 
 cd "$HERE"
 # vendor/ is gitignored to keep the repo lean; populate it once (needs network)
