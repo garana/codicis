@@ -1,0 +1,4 @@
+# Vendored deps (testcontainers + docker client tree) are populated on demand by
+# run.sh (`go mod vendor`); kept out of the repo to stay lean. go.mod/go.sum are
+# committed, so the vendored build is still reproducible.
+/vendor/
