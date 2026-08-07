@@ -73,6 +73,17 @@ class AppServer : public TimerHandler {
   /** @return The bound aggregator WS port (0 if not enabled). */
   std::uint16_t aggregator_ws_port() const;
 
+  /**
+   * @brief Drain in-flight work before shutdown (call after the loop stops).
+   *
+   * Issues a final storage commit and pumps the loop until staged placements
+   * have completed and the storage outbox is committed, or @p max_ms elapses,
+   * so accepted orders are durable before the helper children are torn down.
+   * Best-effort and bounded -- it never blocks shutdown indefinitely.
+   * @param max_ms Maximum time to spend draining, in milliseconds.
+   */
+  void drain(int max_ms);
+
   void on_timer(TimerId id) override;
 
  private:

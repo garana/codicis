@@ -723,6 +723,18 @@ Linux (CI/container) during hardening.
       engine) are drained on the NEXT engine op for that symbol -- eventual, not
       lost. No storage-helper change (they were already agnostic to the ordering
       key's meaning).
+- [x] Graceful shutdown. main() previously just called loop.run() with no
+      signal handling, so SIGTERM killed the process (exit 143) mid-flight -- no
+      drain, no clean helper teardown. Now a SignalStopper (self-pipe trick:
+      the async handler write()s a byte to a pipe whose read end is a normal
+      loop descriptor; portable across kqueue/epoll, no signalfd/EVFILT_SIGNAL)
+      turns SIGTERM/SIGINT into loop.stop(). After run() returns,
+      AppServer::drain(max_ms) issues a final commit and pumps the loop
+      (run_once works after stop) until staged placements finish and the storage
+      outbox is committed (bounded ~5s), then RAII tears down: helper clients
+      close their stdin, the child helpers see EOF and exit. Verified live:
+      SIGTERM -> exit 0 with "drained cleanly" (was exit 143). The black-box
+      smoke test (tests/blackbox) can now assert rc=0.
 - [x] Boot restart safety -- seed counters from storage. On boot the monotonic
       counters reset (OrderBook `next_seq`, engine `next_order_id_`), so without
       seeding a post-restart order would collide with a restored order's id and

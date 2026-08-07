@@ -485,6 +485,37 @@ void AppServer::on_timer(TimerId /*id*/) {
   }
 }
 
+void AppServer::drain(int max_ms) {
+  LogMessage(LogLevel::kInfo, "shutdown: draining in-flight work");
+  if (engine_) {
+    engine_->commit();  // flush any un-committed reports
+  }
+  // Pump the loop until staged placements finish and the outbox is committed,
+  // or the deadline elapses. run_once() works after stop() (it does not check
+  // the run() flag), so this drains without re-entering run().
+  const int iters = max_ms > 0 ? max_ms / 5 : 0;
+  for (int i = 0; i < iters; ++i) {
+    const bool pending = engine_ && engine_->pending_placements() > 0;
+    const bool outbox = storage_ && storage_->processed_pending() > 0;
+    if (!pending && !outbox) {
+      break;
+    }
+    if (i % 40 == 0 && engine_) {
+      engine_->commit();  // periodically re-ask for a commit while draining
+    }
+    loop_.run_once(5);
+  }
+  const std::size_t left = storage_ ? storage_->processed_pending() : 0;
+  if (left > 0) {
+    std::ostringstream m;
+    m << "shutdown: drain deadline reached with " << left
+      << " un-committed report(s)";
+    LogMessage(LogLevel::kWarn, m.str());
+  } else {
+    LogMessage(LogLevel::kInfo, "shutdown: drained cleanly");
+  }
+}
+
 void AppServer::setup_routes() {
   router_.add("GET", "/health", [](const HttpRequest&, HttpResponse& resp) {
     resp.set_status(200);
