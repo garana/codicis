@@ -1,0 +1,3 @@
+BTC	{"t":"l1","sym":"BTC","seq":1,"bid":101,"bid_qty":3,"ask":105,"ask_qty":8}
+BTC	{"t":"l1","sym":"BTC","seq":3,"bid":102,"bid_qty":5,"ask":104,"ask_qty":6}
+ETH	{"t":"l1","sym":"ETH","seq":2,"bid":200,"bid_qty":1,"ask":205,"ask_qty":2}
