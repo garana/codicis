@@ -21,7 +21,7 @@ internal/feed       shared feed decode + subscription (added with the feed helpe
 schema/             reference DDL (postgres.sql, mysql.sql) + embed
 cmd/storage-*       one storage-helper binary per database
 cmd/feed-*          one feed-fanout binary per broker (added incrementally)
-docker/             docker-compose backing services for integration tests
+integration/        black-box integration suite (testcontainers-go)
 ```
 
 The shared runtime handles the protocol once; each backend supplies only a thin
@@ -105,33 +105,29 @@ largest resting rank (`max_rank`, from `resting`); codicis calls it once on boot
 to seed its id/priority counters above anything durable, so post-restart orders
 never collide with -- or jump ahead of -- restored resting orders.
 
-## Integration tests (Docker)
+## Integration tests
+
+All eleven backends (3 storage + 8 feed) are covered by one black-box suite
+under `integration/` and run with a single command:
 
 ```
-docker compose -f docker/docker-compose.yml up -d      # postgres, mysql, mongo
-cd helpers
-CODICIS_PG_DSN='postgres://codicis:codicis@localhost:5432/codicis?sslmode=disable' \
-  go test -tags integration ./cmd/storage-postgres/
-CODICIS_MYSQL_DSN='codicis:codicis@tcp(localhost:3306)/codicis' \
-  go test -tags integration ./cmd/storage-mysql/
-CODICIS_MONGO_URI='mongodb://localhost:27017' \
-  go test -tags integration ./cmd/storage-mongo/
+make -C helpers integration        # ~60s once images are pulled
 ```
 
-Each test drives its `Store` through a full order lifecycle (rest -> pull ->
-partial fill -> position -> complete fill -> cancel) against the real database.
-Without the env var set, the test skips.
+There is no docker-compose and no fixed host ports: the suite uses
+testcontainers-go, which brings up each backing service on an ephemeral,
+Docker-assigned port, so nothing collides with a host postgres/mongod/etc.
+`integration/run.sh` bootstraps the tree-local Go, builds the helper binaries
+the tests exec, vendors the integration deps on first run, then runs the suite
+offline. It needs only a Docker daemon and curl/tar/sha256.
 
-### One command (CI / clean-room)
-
-`make integration` runs `docker/run-integration.sh`, which brings up every
-backing service, waits for readiness, runs all storage + feed integration tests
-against them with the right env, tears down, and exits non-zero on any failure.
-It builds from `vendor/` (offline) and is what a clean-room / CI job invokes:
+The tests are black-box -- they exec the built helper binary and drive it over
+the wire protocol (storage) or feed it book events on stdin and subscribe to the
+broker (feed), asserting against golden snapshots in `integration/testdata/`.
+Extra args pass through to `go test`, e.g. run one backend:
 
 ```
-make -C helpers integration        # ~30s once images are pulled
-KEEP_UP=1 make -C helpers integration   # leave services up for debugging
+./integration/run.sh -run TestStoragePostgres
 ```
 
 ## Feed helpers
@@ -164,21 +160,14 @@ feed-rabbitmq -feed 127.0.0.1:9100 -amqp amqp://guest:guest@localhost:5672/
 feed-sqs      -feed 127.0.0.1:9100 -queue "$SQS_URL" -endpoint "$AWS_ENDPOINT_URL"
 ```
 
-Integration tests (gated on the broker env var) stand up a fake feed source and
-assert the bridge republishes to the real broker:
+The `integration/` suite covers every bridge (see "Integration tests" above): a
+fake feed source repeats a fixed L1 stream, the built bridge republishes to a
+testcontainers-managed broker, and the test subscribes and snapshots the
+published messages. SNS/SQS use LocalStack; ZeroMQ is pure-Go and binds its own
+PUB socket (no broker container). Run one bridge:
 
 ```
-docker compose -f docker/docker-compose.yml up -d      # all brokers
-CODICIS_REDIS_ADDR=localhost:6379 go test -tags integration ./cmd/feed-redis/
-CODICIS_NATS_URL=nats://localhost:4222 go test -tags integration ./cmd/feed-nats/
-CODICIS_KAFKA_BROKERS=localhost:9092  go test -tags integration ./cmd/feed-kafka/
-CODICIS_AMQP_URL=amqp://codicis:codicis@localhost:5672/ \
-  go test -tags integration ./cmd/feed-rabbitmq/
-CODICIS_MQTT_URL=tcp://localhost:1883 go test -tags integration ./cmd/feed-mqtt/
-go test ./cmd/feed-zeromq/            # ZeroMQ is pure-Go: no broker needed
-AWS_ENDPOINT_URL=http://localhost:4566 AWS_REGION=us-east-1 \
-  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
-  go test -tags integration ./cmd/feed-sqs/ ./cmd/feed-sns/   # LocalStack
+./integration/run.sh -run TestFeedRedis
 ```
 
 ## Third-party licenses

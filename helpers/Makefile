@@ -36,19 +36,14 @@ build: toolchain ## build every helper into ./bin
 test: toolchain ## run the unit tests (no external services needed)
 	$(GO) test ./internal/...
 
-# Full integration: bring up every backing service (docker-compose), run all
-# helper integration tests against them, then tear down. This is what the
-# clean-room invokes.
-integration: toolchain ## docker up -> run all integration tests -> docker down
-	GO=$(GO) ./docker/run-integration.sh
-
-# Individual integration tests expect a running service; point the env at it.
-integration-postgres: toolchain
-	$(GO) test -tags integration ./cmd/storage-postgres/
-integration-mysql: toolchain
-	$(GO) test -tags integration ./cmd/storage-mysql/
-integration-mongo: toolchain
-	$(GO) test -tags integration ./cmd/storage-mongo/
+# Full integration: the black-box suite in ./integration. testcontainers-go
+# brings up each backing service on an ephemeral Docker-assigned port (no
+# docker-compose, no fixed host ports, nothing to collide with). run.sh
+# bootstraps the tree-local Go, builds the helper binaries the tests exec, and
+# runs the vendored suite. This is what the clean-room invokes; it needs only a
+# Docker daemon + curl/tar/sha256. Extra args pass through to `go test`.
+integration: ## run the black-box integration suite (testcontainers-go)
+	./integration/run.sh
 
 vendor: toolchain ## re-resolve and vendor dependencies into ./vendor
 	GOFLAGS=-mod=mod $(GO) mod tidy
