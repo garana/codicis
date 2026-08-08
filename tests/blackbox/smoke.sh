@@ -78,18 +78,13 @@ while [ "$i" -lt 50 ]; do
   prev=$cur; i=$((i + 1)); sleep 0.1
 done
 
-# codicis has no graceful SIGTERM handler yet, so SIGTERM terminates it
-# (exit 143). Stop it and capture regardless of exit code; asserting a clean
-# exit-0 shutdown is a follow-up gated on adding signal handling to the binary.
+# SIGTERM must drain and exit cleanly (0), not be killed (143).
 kill -TERM "$PID" 2>/dev/null || true
 rc=0
 wait "$PID" || rc=$?
 PID=""
-if [ "$rc" = 0 ]; then
-  echo "clean shutdown on SIGTERM (exit 0)"
-else
-  echo "NOTE: codicis exited on SIGTERM with rc=$rc (no graceful-shutdown handler)"
-fi
+[ "$rc" = 0 ] || { echo "FAIL: codicis did not shut down cleanly on SIGTERM (rc=$rc)"; cat "$WORK/err.log"; exit 1; }
+echo "clean shutdown on SIGTERM (exit 0)"
 
 # --- normalize volatile fields, then compare / bless the golden ---------------
 # Normalize the capture into a deterministic snapshot:
